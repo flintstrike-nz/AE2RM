@@ -7,19 +7,17 @@ rendering path work on real hardware before porting any game rules.
 
 ## Target hardware
 
-ESP32-S3 2.8" ILI9341 board (diymore-style ES3C28P/ES3N28P):
-- ILI9341V, 240x320, 4-wire SPI
-- FT6336G capacitive touch, I2C (ES3C28P variant only)
-- MicroSD card slot (used here for game assets)
+ESP32-S3 2.8" board, ES3C28P ("Xiaozhi" variant):
+- ILI9341, 240x320, 4-wire SPI — **display + touch pins user-confirmed
+  working on real hardware**
+- FT6336 capacitive touch, I2C
+- ES8311 audio codec + I2S (not used by the firmware yet)
+- MicroSD via SD/MMC 4-bit (not SPI — its own dedicated pins)
 - 16MB flash, 512KB SRAM + PSRAM
 
-**GPIO pins are placeholders — see the big warning at the top of
-`include/board_pins.h`.** The spec sheet for this board documents the
-chips and interfaces but not exact pin numbers. Confirm them against your
-actual unit (seller wiki/example code, or continuity testing) before
-trusting them. Getting a pin wrong usually just means "nothing draws", but
-a wrong assignment could contend with another peripheral wired to the
-same physical line and damage the board — verify before flashing.
+See `include/board_pins.h` for the full pinout. Display/touch are
+verified; SD, audio, and misc pins are transcribed from vendor docs and
+not yet confirmed on-device.
 
 ## What's implemented
 
@@ -59,10 +57,10 @@ pio device monitor
 This was built and the asset converter was run and its output checked
 (header parses to the expected 12x12 map, tile files are the expected
 size). **It has not been flashed to or run on physical hardware** — this
-session has no access to your board. Confirm the pins in `board_pins.h`
-first, then flash and report back what you see; the touch-pan loop and
-tile rendering are the two things most likely to need a follow-up fix
-once you can see real output.
+session has no access to your board. Display/touch pins are confirmed;
+SD/MMC pins are not — flash and report back what you see. The SD/MMC
+init, tile rendering, and touch-pan loop are the things most likely to
+need a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 

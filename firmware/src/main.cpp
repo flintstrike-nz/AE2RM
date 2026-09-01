@@ -7,8 +7,8 @@
 // See firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
-#include <SD.h>
-#include <SPI.h>
+#include <FS.h>
+#include <SD_MMC.h>
 #include "LGFX_Config.h"
 #include "board_pins.h"
 
@@ -38,7 +38,7 @@ bool loadTile(int index)
 
     char path[48];
     snprintf(path, sizeof(path), "/tiles0/tile_%02d.bin", index);
-    File f = SD.open(path, FILE_READ);
+    File f = SD_MMC.open(path, FILE_READ);
     if (!f)
     {
         Serial.printf("tile load failed: %s\n", path);
@@ -57,7 +57,7 @@ bool loadTile(int index)
 
 bool loadMap(const char *path)
 {
-    File f = SD.open(path, FILE_READ);
+    File f = SD_MMC.open(path, FILE_READ);
     if (!f)
     {
         Serial.printf("map load failed: %s\n", path);
@@ -139,9 +139,10 @@ void drawViewport()
     int rows = DISPLAY_HEIGHT / TILE_SIZE + 2;
 
     // Load every tile this frame needs from the SD card *before* opening the
-    // display SPI transaction below -- the SD card and the panel share the
-    // same SPI bus, so interleaving card reads with an in-progress display
-    // transaction can corrupt traffic on both.
+    // display transaction below. SD/MMC and the display SPI bus are on
+    // separate pins on this board, but keeping card I/O out of the
+    // startWrite()/endWrite() block still avoids holding that transaction
+    // open across slower, variable-latency card reads.
     for (int row = 0; row < rows; ++row)
     {
         for (int col = 0; col < cols; ++col)
@@ -211,11 +212,10 @@ void setup()
     gfx.println("AE2RM ESP32");
     gfx.println("booting...");
 
-    // SD card shares the display's SPI wiring on this board; give it its
-    // own SPIClass instance on the same pins (LovyanGFX drives the panel
-    // through the ESP-IDF SPI driver directly, not through this object).
-    SPI.begin(PIN_LCD_SCLK, PIN_LCD_MISO, PIN_LCD_MOSI, PIN_SD_CS);
-    if (!SD.begin(PIN_SD_CS, SPI))
+    // SD card is wired as SD/MMC 4-bit, on its own dedicated pins (not
+    // shared with the display's SPI bus).
+    SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
+    if (!SD_MMC.begin())
     {
         gfx.println("SD init failed!");
         Serial.println("SD init failed");

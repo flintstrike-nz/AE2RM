@@ -1,42 +1,54 @@
 #pragma once
 
-// !!! VERIFY BEFORE FLASHING !!!
+// ES3C28P (ESP32-S3 2.8" "Xiaozhi" board) pinout.
 //
-// The AliExpress listing for this board (diymore-style ESP32-S3 2.8" ILI9341
-// + FT6336G touch module) documents the display/touch ICs and the fact that
-// they're wired via 4-line SPI (display) and I2C (touch), but does not
-// publish an exact GPIO pinout in the spec sheet. These pin numbers are
-// placeholders based on the most common wiring for this class of board and
-// MUST be confirmed against your actual unit before you rely on them:
-//   - check the seller's product page / wiki / included "CD" resources for
-//     a pinout diagram or example sketch,
-//   - or trace/continuity-test the module against the ESP32-S3 pins,
-//   - or open an issue on the seller's github/wiki if they provide one.
-// Wrong pins here will usually just mean "nothing draws" / "touch doesn't
-// respond", but an incorrect assignment could also drive a pin against
-// another peripheral wired to the same physical line (e.g. if this module
-// reuses a GPIO for something other than what's listed below), which can
-// damage the board. Verify every pin against your actual unit before
-// flashing -- don't trust these values as fact.
+// Display + touch below are user-confirmed working on real hardware.
+// SD, audio, and misc pins are transcribed from the vendor doc / lcdwiki
+// and NOT yet confirmed on-device -- treat them the same way the whole
+// file used to be treated: verify before relying on them, since a wrong
+// assignment could contend with another peripheral on the same line and
+// damage the board.
 
-// --- Display (ILI9341V, 4-wire SPI) ---
+// --- Display (ILI9341, 4-wire SPI, SPI2 host) — verified working ---
 #define PIN_LCD_SCLK   12
-#define PIN_LCD_MOSI   11
+#define PIN_LCD_MOSI   11 // silkscreen "SDA"
 #define PIN_LCD_MISO   13
-#define PIN_LCD_DC      2
 #define PIN_LCD_CS     10
-#define PIN_LCD_RST     3   // set to -1 if RST is tied to EN/3V3 on your unit
-#define PIN_LCD_BL     14
+#define PIN_LCD_DC     46 // "RS" on some diagrams
+#define PIN_LCD_RST    -1 // tied to chip EN
+#define PIN_LCD_BL     45 // PWM
 
-// --- Touch (FT6336G, I2C) — ES3C28P (touch) variant only ---
-#define PIN_TOUCH_SDA   6
-#define PIN_TOUCH_SCL   7
-#define PIN_TOUCH_INT   5
-#define PIN_TOUCH_RST   4   // set to -1 if not broken out separately
+// --- Touch (FT6336, I2C, addr 0x38) — verified working ---
+#define PIN_TOUCH_SDA  16
+#define PIN_TOUCH_SCL  15
+#define PIN_TOUCH_INT  17
+#define PIN_TOUCH_RST  18
 
-// --- MicroSD card (SPI, used for game assets) ---
-#define PIN_SD_CS       9
-// SD shares the display's SCLK/MOSI/MISO lines on most of these boards.
+// --- Audio codec (ES8311, I2C addr 0x18 — shares the touch I2C bus) + I2S ---
+// Not used by the firmware yet; recorded here for the next milestone.
+#define PIN_AUDIO_PA_EN 1  // codec enable / speaker amp
+#define PIN_I2S_MCLK    4
+#define PIN_I2S_BCLK    5
+#define PIN_I2S_WS      7  // LRCK
+#define PIN_I2S_DOUT    8  // to speaker
+#define PIN_I2S_DIN     6  // from mic
+
+// --- MicroSD card — SD/MMC 4-bit (NOT SPI), used for game assets ---
+#define PIN_SD_CLK     38
+#define PIN_SD_CMD     40
+#define PIN_SD_D0      39
+#define PIN_SD_D1      41
+#define PIN_SD_D2      48
+#define PIN_SD_D3      47
+
+// --- Misc ---
+#define PIN_RGB_LED     42 // WS2812, single
+#define PIN_BOOT_BTN     0
+#define PIN_BATTERY_ADC  9
+#define PIN_UART_TX     43
+#define PIN_UART_RX     44
+// Free expansion pins: 2, 3, 14, 21
+// Reserved, do not use: 19/20 (native USB), 26-37 (octal PSRAM)
 
 #define DISPLAY_WIDTH  240
 #define DISPLAY_HEIGHT 320

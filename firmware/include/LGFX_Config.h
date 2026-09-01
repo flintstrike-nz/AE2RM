@@ -43,7 +43,7 @@ public:
             cfg.invert     = false;
             cfg.rgb_order  = false;
             cfg.dlen_16bit = false;
-            cfg.bus_shared = true; // SD card shares this SPI bus
+            cfg.bus_shared = false; // SD card uses SD/MMC on separate pins, not this SPI bus
             _panel_instance.config(cfg);
         }
         {
