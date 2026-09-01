@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+assets/sdcard/
+include/secrets.h
