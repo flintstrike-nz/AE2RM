@@ -17,8 +17,9 @@ ESP32-S3 2.8" ILI9341 board (diymore-style ES3C28P/ES3N28P):
 `include/board_pins.h`.** The spec sheet for this board documents the
 chips and interfaces but not exact pin numbers. Confirm them against your
 actual unit (seller wiki/example code, or continuity testing) before
-trusting them. Getting a pin wrong just means "nothing draws" — it won't
-damage the board.
+trusting them. Getting a pin wrong usually just means "nothing draws", but
+a wrong assignment could contend with another peripheral wired to the
+same physical line and damage the board — verify before flashing.
 
 ## What's implemented
 

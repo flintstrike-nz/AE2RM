@@ -12,8 +12,12 @@
 //     a pinout diagram or example sketch,
 //   - or trace/continuity-test the module against the ESP32-S3 pins,
 //   - or open an issue on the seller's github/wiki if they provide one.
-// Wrong pins here just mean "nothing draws" / "touch doesn't respond" --
-// it will not damage the board -- but don't trust these values as fact.
+// Wrong pins here will usually just mean "nothing draws" / "touch doesn't
+// respond", but an incorrect assignment could also drive a pin against
+// another peripheral wired to the same physical line (e.g. if this module
+// reuses a GPIO for something other than what's listed below), which can
+// damage the board. Verify every pin against your actual unit before
+// flashing -- don't trust these values as fact.
 
 // --- Display (ILI9341V, 4-wire SPI) ---
 #define PIN_LCD_SCLK   12

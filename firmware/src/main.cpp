@@ -44,8 +44,13 @@ bool loadTile(int index)
         Serial.printf("tile load failed: %s\n", path);
         return false;
     }
-    f.read(reinterpret_cast<uint8_t *>(tileCache[index]), sizeof(tileCache[index]));
+    size_t got = f.read(reinterpret_cast<uint8_t *>(tileCache[index]), sizeof(tileCache[index]));
     f.close();
+    if (got != sizeof(tileCache[index]))
+    {
+        Serial.printf("tile %d short read (%u/%u bytes)\n", index, (unsigned)got, (unsigned)sizeof(tileCache[index]));
+        return false;
+    }
     tileLoaded[index] = true;
     return true;
 }
@@ -64,23 +69,59 @@ bool loadMap(const char *path)
     // (x outer, y inner) order. Building/unit data follows but this
     // milestone only renders terrain.
     uint8_t hdr[8];
-    f.read(hdr, 8);
-    mapWidth = (hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
-    mapHeight = (hdr[4] << 24) | (hdr[5] << 16) | (hdr[6] << 8) | hdr[7];
+    if (f.read(hdr, 8) != 8)
+    {
+        Serial.printf("map %s: truncated header\n", path);
+        f.close();
+        return false;
+    }
+    int width = (hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
+    int height = (hdr[4] << 24) | (hdr[5] << 16) | (hdr[6] << 8) | hdr[7];
+
+    // Sanity bounds: real AE2RM maps are well under 256x256 tiles; this also
+    // keeps the width*height multiplication below from overflowing int.
+    constexpr int MAX_MAP_DIM = 256;
+    if (width <= 0 || height <= 0 || width > MAX_MAP_DIM || height > MAX_MAP_DIM)
+    {
+        Serial.printf("map %s: implausible dimensions %dx%d\n", path, width, height);
+        f.close();
+        return false;
+    }
+
+    size_t tileDataSize = (size_t)width * (size_t)height;
+    uint8_t *newTiles = static_cast<uint8_t *>(malloc(tileDataSize));
+    if (!newTiles)
+    {
+        Serial.printf("map %s: out of memory allocating %u bytes\n", path, (unsigned)tileDataSize);
+        f.close();
+        return false;
+    }
+
+    if (f.read(newTiles, tileDataSize) != tileDataSize)
+    {
+        Serial.printf("map %s: truncated tile data\n", path);
+        free(newTiles);
+        f.close();
+        return false;
+    }
+    f.close();
 
     free(mapTiles);
-    mapTiles = static_cast<uint8_t *>(malloc(mapWidth * mapHeight));
-    f.read(mapTiles, mapWidth * mapHeight);
-    f.close();
+    mapTiles = newTiles;
+    mapWidth = width;
+    mapHeight = height;
 
     Serial.printf("loaded map %s: %dx%d tiles\n", path, mapWidth, mapHeight);
     return true;
 }
 
+inline bool inMapBounds(int mx, int my)
+{
+    return mx >= 0 && my >= 0 && mx < mapWidth && my < mapHeight;
+}
+
 inline uint8_t tileAt(int mx, int my)
 {
-    if (mx < 0 || my < 0 || mx >= mapWidth || my >= mapHeight)
-        return 0;
     return mapTiles[mx * mapHeight + my];
 }
 
@@ -91,6 +132,22 @@ void drawViewport()
     int cols = DISPLAY_WIDTH / TILE_SIZE + 2;
     int rows = DISPLAY_HEIGHT / TILE_SIZE + 2;
 
+    // Load every tile this frame needs from the SD card *before* opening the
+    // display SPI transaction below -- the SD card and the panel share the
+    // same SPI bus, so interleaving card reads with an in-progress display
+    // transaction can corrupt traffic on both.
+    for (int row = 0; row < rows; ++row)
+    {
+        for (int col = 0; col < cols; ++col)
+        {
+            int mx = firstCol + col;
+            int my = firstRow + row;
+            if (!inMapBounds(mx, my))
+                continue;
+            loadTile(tileAt(mx, my));
+        }
+    }
+
     gfx.startWrite();
     for (int row = 0; row < rows; ++row)
     {
@@ -98,8 +155,11 @@ void drawViewport()
         {
             int mx = firstCol + col;
             int my = firstRow + row;
+            if (!inMapBounds(mx, my))
+                continue; // leave the cleared background showing past the map edge
+
             uint8_t tile = tileAt(mx, my);
-            if (!loadTile(tile))
+            if (!tileLoaded[tile])
                 continue;
 
             int px = mx * TILE_SIZE - viewX;
@@ -126,6 +186,11 @@ void setup()
     gfx.init();
     gfx.setRotation(0);
     gfx.setBrightness(200);
+    // tools/convert_assets.py writes each RGB565 pixel as a native
+    // (little-endian) uint16_t, matching tileCache's in-memory layout, so
+    // pushImage() below must not byte-swap them; set this explicitly
+    // rather than relying on the library default.
+    gfx.setSwapBytes(false);
     gfx.fillScreen(TFT_BLACK);
     gfx.setTextColor(TFT_WHITE);
     gfx.setTextSize(2);
