@@ -159,7 +159,7 @@ void drawViewport()
                 continue; // leave the cleared background showing past the map edge
 
             uint8_t tile = tileAt(mx, my);
-            if (!tileLoaded[tile])
+            if (tile >= TILE_COUNT || !tileLoaded[tile])
                 continue;
 
             int px = mx * TILE_SIZE - viewX;
