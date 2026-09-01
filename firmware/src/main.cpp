@@ -75,18 +75,24 @@ bool loadMap(const char *path)
         f.close();
         return false;
     }
-    int width = (hdr[0] << 24) | (hdr[1] << 16) | (hdr[2] << 8) | hdr[3];
-    int height = (hdr[4] << 24) | (hdr[5] << 16) | (hdr[6] << 8) | hdr[7];
+    // Assemble as uint32_t first: for a malformed header, hdr[0]/hdr[4] can
+    // be >= 0x80, and shifting that into bit 31 of a (promoted-to-)signed
+    // int is undefined behavior before the sanity check below ever runs.
+    uint32_t rawWidth = (uint32_t(hdr[0]) << 24) | (uint32_t(hdr[1]) << 16) | (uint32_t(hdr[2]) << 8) | hdr[3];
+    uint32_t rawHeight = (uint32_t(hdr[4]) << 24) | (uint32_t(hdr[5]) << 16) | (uint32_t(hdr[6]) << 8) | hdr[7];
 
     // Sanity bounds: real AE2RM maps are well under 256x256 tiles; this also
-    // keeps the width*height multiplication below from overflowing int.
-    constexpr int MAX_MAP_DIM = 256;
-    if (width <= 0 || height <= 0 || width > MAX_MAP_DIM || height > MAX_MAP_DIM)
+    // keeps the width*height multiplication below from overflowing int, and
+    // only narrows to int after rawWidth/rawHeight are known to fit.
+    constexpr uint32_t MAX_MAP_DIM = 256;
+    if (rawWidth == 0 || rawHeight == 0 || rawWidth > MAX_MAP_DIM || rawHeight > MAX_MAP_DIM)
     {
-        Serial.printf("map %s: implausible dimensions %dx%d\n", path, width, height);
+        Serial.printf("map %s: implausible dimensions %lux%lu\n", path, (unsigned long)rawWidth, (unsigned long)rawHeight);
         f.close();
         return false;
     }
+    int width = int(rawWidth);
+    int height = int(rawHeight);
 
     size_t tileDataSize = (size_t)width * (size_t)height;
     uint8_t *newTiles = static_cast<uint8_t *>(malloc(tileDataSize));
@@ -159,11 +165,18 @@ void drawViewport()
                 continue; // leave the cleared background showing past the map edge
 
             uint8_t tile = tileAt(mx, my);
-            if (tile >= TILE_COUNT || !tileLoaded[tile])
-                continue;
-
             int px = mx * TILE_SIZE - viewX;
             int py = my * TILE_SIZE - viewY;
+
+            if (tile >= TILE_COUNT || !tileLoaded[tile])
+            {
+                // A failed/out-of-range tile would otherwise leave whatever
+                // was drawn at this rectangle by a previous frame's scroll
+                // position showing through.
+                gfx.fillRect(px, py, TILE_SIZE, TILE_SIZE, TFT_BLACK);
+                continue;
+            }
+
             gfx.pushImage(px, py, TILE_SIZE, TILE_SIZE, tileCache[tile]);
         }
     }
