@@ -97,8 +97,12 @@ in your local `platformio.ini` (don't commit the password).
 The board shows an "OTA update..." screen with a progress percentage while
 flashing, then reboots into the new firmware. The partition table
 (`default_16MB.csv`) has two app slots (`app0`/`app1`), so an OTA write
-goes to the inactive slot and won't brick a working board; USB flashing
-is still there as a fallback if WiFi is ever unreachable.
+lands on the inactive slot instead of overwriting the one that's running.
+That's not the same as automatic rollback, though: this firmware doesn't
+configure ESP-IDF bootloader rollback or app-side image validation, so a
+bad image that still boots (just broken) will stay selected. **USB
+flashing is the recovery path** if an OTA update leaves the board in a
+bad state.
 
 ## Verification status
 

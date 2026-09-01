@@ -240,6 +240,16 @@ void setupOTA()
     {
         ArduinoOTA.setPassword(OTA_PASSWORD);
     }
+    else
+    {
+        // Not fatal -- this is a hobby device, and requiring a password
+        // would break the simplest "just try it on my LAN" path -- but
+        // this must not be silent: anyone who can reach this device on
+        // the network can flash it while OTA_PASSWORD is unset.
+        Serial.println("WARNING: OTA_PASSWORD is empty -- OTA updates are unauthenticated");
+        gfx.println("WARNING: OTA has no password!");
+        delay(1500);
+    }
 
     ArduinoOTA.onStart([]()
                         {
