@@ -9,10 +9,23 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <SD_MMC.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
 #include "LGFX_Config.h"
 #include "board_pins.h"
 
+#if __has_include("secrets.h")
+#include "secrets.h"
+#else
+// No secrets.h -- see include/secrets.h.example. Without it, WiFi/OTA are
+// skipped entirely and the firmware just runs standalone off the SD card.
+#define WIFI_SSID ""
+#define WIFI_PASSWORD ""
+#define OTA_PASSWORD ""
+#endif
+
 static LGFX gfx;
+static bool otaInProgress = false;
 
 constexpr int TILE_SIZE = 24;
 constexpr int TILE_COUNT = 48;
@@ -192,6 +205,70 @@ void clampView()
     viewY = constrain(viewY, 0, max(0, maxY));
 }
 
+// Connects to WiFi (if secrets.h provides an SSID) and starts ArduinoOTA.
+// Non-fatal on failure -- the game runs fine offline off the SD card, it
+// just won't be updatable over the air until WiFi is reachable.
+void setupOTA()
+{
+    if (strlen(WIFI_SSID) == 0)
+    {
+        Serial.println("no WIFI_SSID in secrets.h -- skipping WiFi/OTA");
+        return;
+    }
+
+    gfx.println("connecting wifi...");
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+    constexpr uint32_t WIFI_TIMEOUT_MS = 10000;
+    uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS)
+    {
+        delay(250);
+    }
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("WiFi connect timed out -- continuing offline");
+        gfx.println("wifi failed, continuing offline");
+        WiFi.mode(WIFI_OFF);
+        return;
+    }
+
+    ArduinoOTA.setHostname("ae2rm");
+    if (strlen(OTA_PASSWORD) > 0)
+    {
+        ArduinoOTA.setPassword(OTA_PASSWORD);
+    }
+
+    ArduinoOTA.onStart([]()
+                        {
+        otaInProgress = true;
+        gfx.fillScreen(TFT_BLACK);
+        gfx.setCursor(10, 10);
+        gfx.println("OTA update...");
+        Serial.println("OTA: start"); });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total)
+                           {
+        int pct = total ? (progress * 100) / total : 0;
+        gfx.fillRect(10, 40, 220, 20, TFT_BLACK);
+        gfx.setCursor(10, 40);
+        gfx.printf("%d%%", pct); });
+    ArduinoOTA.onEnd([]()
+                      { Serial.println("OTA: done, rebooting"); });
+    ArduinoOTA.onError([](ota_error_t error)
+                        {
+        otaInProgress = false;
+        Serial.printf("OTA error [%u]\n", error);
+        gfx.println("OTA failed"); });
+
+    ArduinoOTA.begin();
+
+    Serial.printf("wifi connected: %s   OTA host: ae2rm.local\n", WiFi.localIP().toString().c_str());
+    gfx.printf("wifi: %s\n", WiFi.localIP().toString().c_str());
+    delay(500);
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -230,6 +307,8 @@ void setup()
             delay(1000);
     }
 
+    setupOTA(); // best-effort; game runs offline if this doesn't connect
+
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 }
@@ -238,6 +317,14 @@ void loop()
 {
     static int32_t lastX = -1, lastY = -1;
     int32_t x, y;
+
+    ArduinoOTA.handle();
+    if (otaInProgress)
+    {
+        // Don't touch the display/SD from the game loop while a flash
+        // write is in progress.
+        return;
+    }
 
     if (gfx.getTouch(&x, &y))
     {

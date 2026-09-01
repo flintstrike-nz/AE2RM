@@ -31,6 +31,8 @@ not yet confirmed on-device.
   big-endian width/height, then a column-major grid of tile-index bytes),
   loads tile bitmaps on demand, and renders a scrollable viewport that you
   pan by dragging on the touchscreen
+- WiFi + OTA updates (`ArduinoOTA`): flash once over USB, then push
+  subsequent builds wirelessly — see "Build & flash" below
 
 ## What's not implemented yet
 
@@ -40,7 +42,7 @@ question this was scoped against), and every map past `m0`. The original
 `MainDisplayable.java` is ~11,000 lines covering all of that; this
 milestone only reads its map-loading format and terrain layer.
 
-## Build
+## Build & flash
 
 ```bash
 pip install Pillow          # for the asset converter
@@ -48,9 +50,55 @@ cd src && make               # extracts AEIIRM_src.zip -> src/java
 cd ../firmware
 python3 tools/convert_assets.py
 # copy the contents of firmware/assets/sdcard/ onto a FAT32 microSD card
-pio run -t upload            # requires PlatformIO (pip install platformio)
+```
+
+### First flash: over USB
+
+WiFi/OTA needs credentials compiled in, so set those up before or after
+your first flash -- they only matter once you want to update wirelessly:
+
+```bash
+cp include/secrets.h.example include/secrets.h
+$EDITOR include/secrets.h    # set WIFI_SSID / WIFI_PASSWORD; OTA_PASSWORD optional
+```
+
+Then, with PlatformIO installed (`pip install platformio`):
+
+```bash
+pio run -t upload
 pio device monitor
 ```
+
+The serial log prints the board's IP and OTA hostname once WiFi connects:
+```
+wifi connected: 192.168.1.42   OTA host: ae2rm.local
+```
+If `secrets.h` is missing or `WIFI_SSID` is empty, the firmware just skips
+WiFi/OTA and runs the game standalone off the SD card -- WiFi is optional.
+
+### Later updates: over the air
+
+```bash
+pio run -e esp32-s3-devkitc-1-ota -t upload
+```
+
+This uses the `esp32-s3-devkitc-1-ota` environment in `platformio.ini`
+(`upload_protocol = espota`, targeting `ae2rm.local`). If mDNS doesn't
+resolve on your network, pass the IP instead:
+
+```bash
+pio run -e esp32-s3-devkitc-1-ota -t upload --upload-port 192.168.1.42
+```
+
+If you set `OTA_PASSWORD` in `secrets.h`, add a matching
+`upload_flags = --auth=yourpassword` line under `[env:esp32-s3-devkitc-1-ota]`
+in your local `platformio.ini` (don't commit the password).
+
+The board shows an "OTA update..." screen with a progress percentage while
+flashing, then reboots into the new firmware. The partition table
+(`default_16MB.csv`) has two app slots (`app0`/`app1`), so an OTA write
+goes to the inactive slot and won't brick a working board; USB flashing
+is still there as a fallback if WiFi is ever unreachable.
 
 ## Verification status
 
@@ -58,9 +106,10 @@ This was built and the asset converter was run and its output checked
 (header parses to the expected 12x12 map, tile files are the expected
 size). **It has not been flashed to or run on physical hardware** — this
 session has no access to your board. Display/touch pins are confirmed;
-SD/MMC pins are not — flash and report back what you see. The SD/MMC
-init, tile rendering, and touch-pan loop are the things most likely to
-need a follow-up fix once you can see real output.
+SD/MMC pins and WiFi/OTA are not — flash over USB first and report back
+what you see. The SD/MMC init, tile rendering, touch-pan loop, and OTA
+path are the things most likely to need a follow-up fix once you can see
+real output.
 
 ## Suggested next milestones
 
