@@ -40,7 +40,12 @@ public:
             cfg.offset_x = 0;
             cfg.offset_y = 0;
             cfg.readable   = true;
-            cfg.invert     = false;
+            // This board's ILI9341V is the IPS variant, whose vendor init
+            // sequence expects INVON (display inversion on) for correct
+            // luminance/colors; LovyanGFX applies cfg.invert as that
+            // per-panel correction. Unverified on hardware -- if colors
+            // look wrong/washed out, this is the first thing to flip.
+            cfg.invert     = true;
             cfg.rgb_order  = false;
             cfg.dlen_16bit = false;
             cfg.bus_shared = false; // SD card uses SD/MMC on separate pins, not this SPI bus

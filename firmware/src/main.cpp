@@ -277,11 +277,14 @@ void setup()
     gfx.init();
     gfx.setRotation(0);
     gfx.setBrightness(200);
-    // tools/convert_assets.py writes each RGB565 pixel as a native
-    // (little-endian) uint16_t, matching tileCache's in-memory layout, so
-    // pushImage() below must not byte-swap them; set this explicitly
-    // rather than relying on the library default.
-    gfx.setSwapBytes(false);
+    // tools/convert_assets.py writes ordinary RGB565 values as a native
+    // (little-endian) uint16_t -- e.g. red (0xF800) is stored as bytes
+    // [0x00, 0xF8] -- matching tileCache's in-memory layout. The panel's
+    // SPI protocol needs each pixel's MSB sent first, so pushImage() must
+    // swap bytes for this data; set it explicitly rather than relying on
+    // the library default. (An earlier version of this line had the
+    // swap backwards -- see PR review history.)
+    gfx.setSwapBytes(true);
     gfx.fillScreen(TFT_BLACK);
     gfx.setTextColor(TFT_WHITE);
     gfx.setTextSize(2);
