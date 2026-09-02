@@ -61,7 +61,10 @@ not yet confirmed on-device.
   it's standing on, scaled by the attacker's current health% — but
   **without** the original's per-property matchup bonuses (mounted vs.
   ground, golem vs. skeleton, water/swamp bonuses, etc.), which depend on
-  per-unit property flags this milestone doesn't read. A unit at 0 health
+  per-unit property flags this milestone doesn't read. A surviving
+  defender counterattacks if adjacent (`Unit.canPerformCloseAttack()`:
+  melee-only, and only if the defender's own `MIN_ATTACK_RANGE` is 1 --
+  the catapult, for example, can never counterattack). A unit at 0 health
   is removed. Damaged units show a small health bar. This is "move OR
   attack" per turn, not the original's "move then attack" -- combining
   the two would need tracking attack range from every tile in the move

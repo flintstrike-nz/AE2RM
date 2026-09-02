@@ -386,7 +386,11 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 // golem-vs-skeleton, water/swamp bonuses, etc. -- see Unit.java's
 // getOffenceBonusAgainstUnit()); those depend on per-unit HasProperty
 // flags this milestone doesn't read.
-void attackUnit(int attackerIdx, int victimIdx)
+// One hit: attackerIdx's roll in [offenceMin, offenceMax) against
+// victimIdx's defence (base + terrain bonus), scaled by the attacker's
+// current health%. Shared by attackUnit()'s direct hit and its
+// counterattack.
+void resolveHit(int attackerIdx, int victimIdx)
 {
     UnitPlacement &attacker = units[attackerIdx];
     UnitPlacement &victim = units[victimIdx];
@@ -404,6 +408,27 @@ void attackUnit(int attackerIdx, int victimIdx)
 
     if (victim.health == 0)
         victim.alive = false;
+}
+
+// Resolves attackerIdx attacking victimIdx, then victimIdx's counterattack
+// if it's still alive and eligible -- matching Unit.java's
+// canPerformCloseAttack(): adjacent (distance == 1, regardless of the
+// attacker's own attack range) AND the victim's own MIN_ATTACK_RANGE is 1
+// (a ranged-only unit like the catapult, MIN_ATTACK_RANGE 2, can never
+// counter). Not ported: canPerformCloseAttack() also checks the victim's
+// unitState != 4, a status-effect flag this milestone doesn't model.
+void attackUnit(int attackerIdx, int victimIdx)
+{
+    resolveHit(attackerIdx, victimIdx);
+
+    UnitPlacement &attacker = units[attackerIdx];
+    UnitPlacement &victim = units[victimIdx];
+    if (victim.alive &&
+        manhattanDist(victim.tileX, victim.tileY, attacker.tileX, attacker.tileY) == 1 &&
+        UNIT_ATTACK_RANGE_MIN[victim.type] == 1)
+    {
+        resolveHit(victimIdx, attackerIdx);
+    }
 }
 
 // Flood-fills how far `u` could move this turn, terrain-cost-limited by
