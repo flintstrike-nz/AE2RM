@@ -882,8 +882,15 @@ void showScriptDialog(const char *text)
 // CreateSpriteAtUnit, StartPlay.
 void runIntroScript()
 {
-    if (!loadStrings())
-        return; // no dialog text available -- skip the cutscene, not show blank boxes
+    // 224 is the highest ShowDialog string index this case range uses
+    // (see @Case 5-12 below) -- a structurally valid but short/empty
+    // table (e.g. a 4-byte strings.dat with count == 0) would otherwise
+    // pass loadStrings() and still leave getScriptString() returning ""
+    // for these IDs, running the cutscene's unit moves/removal but
+    // showing blank dialog boxes instead of the documented skip.
+    constexpr int LAST_INTRO_DIALOG_STRING = 224;
+    if (!loadStrings() || scriptStringCount <= LAST_INTRO_DIALOG_STRING)
+        return; // dialog text unavailable/incomplete -- skip the cutscene, not show blank boxes
 
     File f = SD_MMC.open("/scripts/m0.script", FILE_READ);
     if (!f)
