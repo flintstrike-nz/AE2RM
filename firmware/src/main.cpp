@@ -1,11 +1,11 @@
-// AE2RM ESP32 port -- milestone 2: render map terrain + starting units.
+// AE2RM ESP32 port -- milestone 3: local hotseat movement, no combat/AI.
 //
-// This does NOT yet include game rules, movement, combat, or menus -- units
-// are drawn statically at their map-file starting positions, with no turn
-// logic, selection, or animation. Loads m0.aem + tiles0 + unit_icons from
-// the SD card (converted by tools/convert_assets.py) and lets the player
-// pan around it by touch/drag. See firmware/README.md for what's
-// implemented and what's next.
+// Tap a unit belonging to the current turn's side to select it and see its
+// movement range (terrain-cost-limited flood fill), tap a highlighted tile
+// to move it there, tap the "END TURN" button to pass to the other side.
+// There is still no combat, no AI (this is two-human hotseat only -- see
+// README for why), no menus, and only map m0. Drag still pans the camera.
+// See firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -63,21 +63,72 @@ inline uint16_t *unitIconFrame(int color, int type)
 static bool unitIconLoaded[UNIT_COLOR_COUNT][UNIT_TYPE_COUNT] = {};
 
 // A unit placement read from the map file's trailing unit-record list.
-// This reflects where MainDisplayable.java's loadMap() places starting
-// units, but NOT its actual team-color logic (that goes through the
-// scripted turn queue, which isn't ported). `color` here is simply the
-// map file's raw color slot (0-3, indexing UNIT_COLOR_NAMES directly) --
-// close enough for a static rendering milestone, not authoritative.
+// `color` is the map file's raw color slot (0-3, indexing UNIT_COLOR_NAMES
+// directly), used directly as this unit's team/turn. This is exact for
+// story maps (m0-m7): MainDisplayable.java's loadMap(), for skirmishMode
+// == 0 (which every "m*.aem" map uses), always hardcodes a 2-side turn
+// queue where raw color 0 maps to fraction 1 (drawn blue) and raw color 1
+// to fraction 2 (drawn red) -- see getBuildingFraction()/setBuildingFraction()
+// and the turn-queue setup in loadMap(). It is NOT exact for skirmish maps
+// (s0-s11, not converted/loaded by this firmware), which build a real
+// building-derived turn queue supporting up to 4 sides; that logic isn't
+// ported.
 struct UnitPlacement
 {
     uint8_t type;
     uint8_t color;
     int16_t tileX;
     int16_t tileY;
+    bool hasMoved;
 };
 constexpr int MAX_UNITS = 64;
 static UnitPlacement units[MAX_UNITS];
 static int unitCount = 0;
+
+// Terrain movement cost per type (tiles0.prop's TypeDef line 2: "TypeDef
+// index moveCost defenceBonus name name") and the tile-index -> terrain-type
+// mapping (TypeDef's TileDef lines, first of the two type fields -- the
+// second is only used for the tileset's visual blending, not gameplay).
+// Values are this specific tileset's (tiles0), not general engine
+// constants, but every current map uses tiles0.
+constexpr int TERRAIN_TYPE_COUNT = 11;
+static const uint8_t TERRAIN_MOVE_COST[TERRAIN_TYPE_COUNT] = {1, 1, 2, 2, 3, 3, 1, 1, 1, 1, 3};
+static const uint8_t TILE_TERRAIN_TYPE[TILE_COUNT] = {
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, // 00-14: water
+    2, 2,                                        // 15-16: woods
+    4,                                           // 17: mountain
+    1,                                           // 18: grass
+    3,                                           // 19: hill
+    0, 0, 0, 0, 0, 0, 0,                         // 20-26: road
+    8,                                           // 27: broken building
+    0,                                           // 28: road
+    6, 6,                                        // 29-30: bridge
+    7, 7,                                        // 31-32: town (non-fraction)
+    3,                                           // 33: hill
+    7,                                           // 34: town (non-fraction)
+    3, 3,                                        // 35-36: hill
+    8, 9, 8, 9, 8, 9, 8, 9, 8, 9,                 // 37-46: fraction buildings (village/castle pairs)
+    10,                                          // 47: lava
+};
+
+// Unit.UNIT_NAMES order: soldier, archer, lizard, wizard, wisp, spider,
+// golem, catapult, wyvern, king, skeleton, crystall (from each unit's
+// "MoveRange" line in its .unit file).
+static const uint8_t UNIT_MOVE_RANGE[UNIT_TYPE_COUNT] = {5, 5, 5, 5, 5, 6, 5, 4, 7, 5, 5, 4};
+
+// Movement points remaining when this unit could reach [x*mapHeight+y] on
+// the currently selected unit's turn, or -1 if unreachable. Sized/allocated
+// alongside mapTiles in loadMap(); recomputed by computeReachable() each
+// time a unit is selected.
+static int8_t *reachableCost = nullptr;
+static int selectedUnit = -1; // index into units[], or -1 if none selected
+
+// Two-side hotseat only: 0 or 1, matching UnitPlacement::color directly
+// (see the comment on that struct). There is no AI opponent -- the "other"
+// side is just the second human player's turn. Porting the original's AI
+// (a large scoring heuristic across much of MainDisplayable.java) is out
+// of scope for this milestone.
+static int currentTurn = 0;
 
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
 static int viewY = 0;
@@ -285,6 +336,137 @@ inline uint8_t tileAt(int mx, int my)
     return mapTiles[mx * mapHeight + my];
 }
 
+int unitIndexAt(int mx, int my)
+{
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].tileX == mx && units[i].tileY == my)
+            return i;
+    }
+    return -1;
+}
+
+// Flood-fills how far `u` could move this turn, terrain-cost-limited by
+// UNIT_MOVE_RANGE, into reachableCost (allocated/resized here to match the
+// current map). A tile occupied by any other unit is impassable -- this
+// doesn't distinguish ally/enemy (the original lets a unit pass through
+// allies), which is a simplification, not a port of its exact pathing.
+// Uses relaxation-until-stable rather than a real priority queue: costs
+// are tiny (1-3) and story maps are small, so this is cheap in practice
+// and bounded (at most UNIT_MOVE_RANGE passes) even on a larger map.
+void computeReachable(const UnitPlacement &u)
+{
+    size_t cells = (size_t)mapWidth * mapHeight;
+    static size_t reachableCapacity = 0;
+    if (reachableCapacity != cells)
+    {
+        free(reachableCost);
+        reachableCost = static_cast<int8_t *>(malloc(cells));
+        reachableCapacity = reachableCost ? cells : 0;
+    }
+    if (!reachableCost)
+        return;
+
+    memset(reachableCost, -1, cells);
+    reachableCost[u.tileX * mapHeight + u.tileY] = UNIT_MOVE_RANGE[u.type];
+
+    static const int DX[4] = {1, -1, 0, 0};
+    static const int DY[4] = {0, 0, 1, -1};
+
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (int x = 0; x < mapWidth; ++x)
+        {
+            for (int y = 0; y < mapHeight; ++y)
+            {
+                int budget = reachableCost[x * mapHeight + y];
+                if (budget < 0)
+                    continue;
+                for (int d = 0; d < 4; ++d)
+                {
+                    int nx = x + DX[d], ny = y + DY[d];
+                    if (!inMapBounds(nx, ny))
+                        continue;
+                    int occupant = unitIndexAt(nx, ny);
+                    if (occupant >= 0 && !(nx == u.tileX && ny == u.tileY))
+                        continue;
+                    int cost = TERRAIN_MOVE_COST[TILE_TERRAIN_TYPE[tileAt(nx, ny)]];
+                    int remain = budget - cost;
+                    if (remain < 0)
+                        continue;
+                    int8_t &slot = reachableCost[nx * mapHeight + ny];
+                    if (remain > slot)
+                    {
+                        slot = (int8_t)remain;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void drawViewport();
+
+void endTurn()
+{
+    currentTurn = 1 - currentTurn;
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].color == currentTurn)
+            units[i].hasMoved = false;
+    }
+    selectedUnit = -1;
+    Serial.printf("turn: %s\n", currentTurn == 0 ? "blue" : "red");
+    drawViewport();
+}
+
+constexpr int HUD_BTN_W = 76;
+constexpr int HUD_BTN_H = 22;
+constexpr int HUD_BTN_X = DISPLAY_WIDTH - HUD_BTN_W - 4;
+constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
+
+// Handles a tap (as opposed to a drag-to-pan) at the given screen
+// coordinates: the END TURN button, selecting a movable unit belonging to
+// the current turn, or moving the selected unit to a reachable tile.
+void handleTap(int screenX, int screenY)
+{
+    if (screenX >= HUD_BTN_X && screenX < HUD_BTN_X + HUD_BTN_W &&
+        screenY >= HUD_BTN_Y && screenY < HUD_BTN_Y + HUD_BTN_H)
+    {
+        endTurn();
+        return;
+    }
+
+    int mx = (screenX + viewX) / TILE_SIZE;
+    int my = (screenY + viewY) / TILE_SIZE;
+    if (!inMapBounds(mx, my))
+        return;
+
+    if (selectedUnit >= 0)
+    {
+        if (reachableCost && reachableCost[mx * mapHeight + my] >= 0 && unitIndexAt(mx, my) < 0)
+        {
+            units[selectedUnit].tileX = (int16_t)mx;
+            units[selectedUnit].tileY = (int16_t)my;
+            units[selectedUnit].hasMoved = true;
+        }
+        selectedUnit = -1;
+        drawViewport();
+        return;
+    }
+
+    int idx = unitIndexAt(mx, my);
+    if (idx >= 0 && units[idx].color == currentTurn && !units[idx].hasMoved)
+    {
+        selectedUnit = idx;
+        computeReachable(units[idx]);
+        drawViewport();
+    }
+}
+
 void drawViewport()
 {
     int firstCol = viewX / TILE_SIZE;
@@ -344,6 +526,26 @@ void drawViewport()
         }
     }
 
+    if (selectedUnit >= 0 && reachableCost)
+    {
+        for (int row = 0; row < rows; ++row)
+        {
+            for (int col = 0; col < cols; ++col)
+            {
+                int mx = firstCol + col;
+                int my = firstRow + row;
+                if (!inMapBounds(mx, my))
+                    continue;
+                if (reachableCost[mx * mapHeight + my] < 0)
+                    continue;
+                int px = mx * TILE_SIZE - viewX;
+                int py = my * TILE_SIZE - viewY;
+                gfx.drawRect(px, py, TILE_SIZE, TILE_SIZE, TFT_CYAN);
+                gfx.drawRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, TFT_CYAN);
+            }
+        }
+    }
+
     for (int i = 0; i < unitCount; ++i)
     {
         const UnitPlacement &u = units[i];
@@ -354,7 +556,23 @@ void drawViewport()
         if (px <= -UNIT_ICON_SIZE || py <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
             continue;
         gfx.pushImage(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, unitIconFrame(u.color, u.type), TRANSPARENT_565);
+        if (i == selectedUnit)
+            gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_YELLOW);
     }
+
+    // HUD: fixed screen-space overlay, always on top, not affected by scroll.
+    uint16_t turnColor = currentTurn == 0 ? TFT_BLUE : TFT_RED;
+    gfx.fillRect(0, 0, 90, 16, TFT_BLACK);
+    gfx.setTextColor(turnColor, TFT_BLACK);
+    gfx.setTextSize(1);
+    gfx.setCursor(2, 4);
+    gfx.print(currentTurn == 0 ? "BLUE TURN" : "RED TURN");
+
+    gfx.fillRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_DARKGREY);
+    gfx.drawRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_WHITE);
+    gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    gfx.setCursor(HUD_BTN_X + 6, HUD_BTN_Y + 7);
+    gfx.print("END TURN");
 
     gfx.endWrite();
 }
@@ -516,9 +734,18 @@ void setup()
     drawViewport();
 }
 
+// A touch that never strays more than this many pixels from where it
+// started is a tap (select/move/END TURN); anything that moves further is
+// a drag (pan the camera). Chosen to comfortably exceed capacitive-touch
+// jitter on a stationary finger without feeling laggy for an intentional
+// drag -- unverified on hardware, may need tuning once you can feel it.
+constexpr int32_t TAP_MOVE_THRESHOLD = 8;
+
 void loop()
 {
+    static int32_t touchStartX = -1, touchStartY = -1;
     static int32_t lastX = -1, lastY = -1;
+    static bool isDrag = false;
     int32_t x, y;
 
     ArduinoOTA.handle();
@@ -531,18 +758,31 @@ void loop()
 
     if (gfx.getTouch(&x, &y))
     {
-        if (lastX >= 0)
+        if (lastX < 0)
         {
-            viewX -= (x - lastX);
-            viewY -= (y - lastY);
-            clampView();
-            drawViewport();
+            touchStartX = x;
+            touchStartY = y;
+            isDrag = false;
+        }
+        else
+        {
+            if (!isDrag && (abs(x - touchStartX) > TAP_MOVE_THRESHOLD || abs(y - touchStartY) > TAP_MOVE_THRESHOLD))
+                isDrag = true;
+            if (isDrag)
+            {
+                viewX -= (x - lastX);
+                viewY -= (y - lastY);
+                clampView();
+                drawViewport();
+            }
         }
         lastX = x;
         lastY = y;
     }
     else
     {
+        if (lastX >= 0 && !isDrag)
+            handleTap(lastX, lastY);
         lastX = lastY = -1;
     }
 
