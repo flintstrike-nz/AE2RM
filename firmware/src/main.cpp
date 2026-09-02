@@ -45,6 +45,7 @@
 #include <ArduinoOTA.h>
 #include "LGFX_Config.h"
 #include "board_pins.h"
+#include "embedded_assets.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -58,6 +59,15 @@
 
 static LGFX gfx;
 static bool otaInProgress = false;
+
+// sdReady: the microSD card mounted. assetsReady: the game has a usable
+// asset source -- the SD card, or a set of assets baked into the firmware
+// by tools/convert_assets.py (see openAsset() / embedded_assets.h). When
+// neither is available we still finish setup() and run loop() with the
+// game logic gated off, so WiFi/OTA stay alive and a fixed build can be
+// pushed over the air instead of forcing a USB trip for every SD problem.
+static bool sdReady = false;
+static bool assetsReady = false;
 
 constexpr int TILE_SIZE = 24;
 constexpr int TILE_COUNT = 48;
@@ -264,6 +274,22 @@ enum AppState
 };
 static AppState appState = STATE_MENU;
 
+// Opens a game asset by its card-relative path ("/tiles0/tile_00.bin",
+// "/maps/m0.aem", ...). Prefers the SD card when it's mounted so a card
+// can still override/extend the build; falls back to the copy baked into
+// the firmware by tools/convert_assets.py. Returns an invalid File (bool
+// == false) if neither source has it -- callers already handle that.
+static File openAsset(const char *path)
+{
+    if (sdReady)
+    {
+        File f = SD_MMC.open(path, FILE_READ);
+        if (f)
+            return f;
+    }
+    return openEmbeddedAsset(path);
+}
+
 bool loadTile(int index)
 {
     if (index < 0 || index >= TILE_COUNT)
@@ -273,7 +299,7 @@ bool loadTile(int index)
 
     char path[48];
     snprintf(path, sizeof(path), "/tiles0/tile_%02d.bin", index);
-    File f = SD_MMC.open(path, FILE_READ);
+    File f = openAsset(path);
     if (!f)
     {
         Serial.printf("tile load failed: %s\n", path);
@@ -300,7 +326,7 @@ bool loadUnitIcon(int color, int type)
 
     char path[48];
     snprintf(path, sizeof(path), "/units/%s_%02d.bin", UNIT_COLOR_NAMES[color], type);
-    File f = SD_MMC.open(path, FILE_READ);
+    File f = openAsset(path);
     if (!f)
     {
         Serial.printf("unit icon load failed: %s\n", path);
@@ -394,7 +420,7 @@ void loadUnitPlacements(File &f, const char *path)
 
 bool loadMap(const char *path)
 {
-    File f = SD_MMC.open(path, FILE_READ);
+    File f = openAsset(path);
     if (!f)
     {
         Serial.printf("map load failed: %s\n", path);
@@ -740,7 +766,7 @@ bool loadStrings()
     if (scriptStrings)
         return true;
 
-    File f = SD_MMC.open("/strings.dat", FILE_READ);
+    File f = openAsset("/strings.dat");
     if (!f)
     {
         Serial.println("strings.dat not found -- mission titles/dialog text unavailable");
@@ -1261,7 +1287,7 @@ void runIntroScript()
     if (!loadStrings() || scriptStringCount <= LAST_INTRO_DIALOG_STRING)
         return; // dialog text unavailable/incomplete -- skip the cutscene, not show blank boxes
 
-    File f = SD_MMC.open("/scripts/m0.script", FILE_READ);
+    File f = openAsset("/scripts/m0.script");
     if (!f)
     {
         Serial.println("m0.script not found, skipping intro cutscene");
@@ -2163,19 +2189,32 @@ void setupOTA()
     }
 
     gfx.println("connecting wifi...");
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.setAutoReconnect(true);
 
-    constexpr uint32_t WIFI_TIMEOUT_MS = 10000;
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_TIMEOUT_MS)
+    // The AP here intermittently answers association with AUTH_EXPIRE /
+    // AUTH_FAIL on the first try even with correct credentials, so retry
+    // the whole begin() a few times rather than waiting out one long
+    // timeout. ~6s per attempt, 4 attempts.
+    constexpr uint32_t WIFI_ATTEMPT_MS = 6000;
+    constexpr int WIFI_ATTEMPTS = 4;
+    for (int attempt = 1; attempt <= WIFI_ATTEMPTS && WiFi.status() != WL_CONNECTED; attempt++)
     {
-        delay(250);
+        Serial.printf("wifi: attempt %d/%d\n", attempt, WIFI_ATTEMPTS);
+        WiFi.disconnect(true);
+        delay(100);
+        WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+        uint32_t start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_ATTEMPT_MS)
+        {
+            delay(250);
+        }
     }
 
     if (WiFi.status() != WL_CONNECTED)
     {
-        Serial.println("WiFi connect timed out -- continuing offline");
+        Serial.println("WiFi connect failed -- continuing offline");
         gfx.println("wifi failed, continuing offline");
         WiFi.mode(WIFI_OFF);
         return;
@@ -2276,18 +2315,38 @@ void setup()
             delay(1000);
     }
 
+    // WiFi/OTA first, and before the SD gate below: a missing or
+    // miswired card must not cost us the wireless-recovery path.
+    setupOTA(); // best-effort; game runs offline if this doesn't connect
+
     // SD card is wired as SD/MMC 4-bit, on its own dedicated pins (not
     // shared with the display's SPI bus).
     SD_MMC.setPins(PIN_SD_CLK, PIN_SD_CMD, PIN_SD_D0, PIN_SD_D1, PIN_SD_D2, PIN_SD_D3);
-    if (!SD_MMC.begin())
+    if (SD_MMC.begin())
     {
-        gfx.println("SD init failed!");
+        sdReady = true;
+    }
+    else
+    {
         Serial.println("SD init failed");
-        while (true)
-            delay(1000);
+        gfx.println("SD init failed!");
     }
 
-    setupOTA(); // best-effort; game runs offline if this doesn't connect
+    // Playable as long as *some* asset source exists: the card, or assets
+    // baked into this build by tools/convert_assets.py.
+    assetsReady = sdReady || haveEmbeddedAssets();
+    if (!assetsReady)
+    {
+        gfx.println("no game assets");
+        gfx.println("(OTA still available)");
+        Serial.println("no assets: SD failed and none embedded -- OTA only");
+        return; // fall through to loop(); ArduinoOTA.handle() keeps working
+    }
+    if (!sdReady)
+    {
+        gfx.println("using built-in assets");
+        Serial.println("SD unavailable -- running on embedded assets");
+    }
 
     loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
 
@@ -2318,6 +2377,13 @@ void loop()
         return;
     }
 
+    // No usable asset source: keep servicing OTA (above) but run no game logic.
+    if (!assetsReady)
+    {
+        delay(50);
+        return;
+    }
+
     if (gfx.getTouch(&x, &y))
     {
         if (lastX < 0)
@@ -2334,8 +2400,12 @@ void loop()
                 isDrag = true;
             if (isDrag)
             {
-                viewX -= (x - lastX);
-                viewY -= (y - lastY);
+                // Drag moves the camera the same direction as the finger
+                // (drag right -> see more of the map to the right), i.e.
+                // the viewport tracks the finger rather than the map
+                // sticking to it.
+                viewX += (x - lastX);
+                viewY += (y - lastY);
                 clampView();
                 drawViewport();
             }

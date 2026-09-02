@@ -1,4 +1,5 @@
 .pio/
 .vscode/
 assets/sdcard/
+src/generated_assets.h
 include/secrets.h
