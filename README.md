@@ -48,12 +48,15 @@ the full pinout and hardware details.
 
 ### What's not there yet
 
-An AI on par with the original, the original's scripted mid-mission
-events (two maps currently have fewer enemies than intended as a
-result), in-game menus beyond mission select, and MIDI music (the
-original's music format needs its own synthesizer — there's no audio
-subsystem yet). See [`firmware/README.md`](firmware/README.md) for the
-full list and the reasoning behind each scoping decision.
+An AI on par with the original, and the original's scripted mid-mission
+events — two of the eight story maps (`m4`, `m6`) start with zero enemy
+units and rely entirely on those scripted spawns, so they can't reach
+the win condition at all in single-player yet, not just "fewer enemies
+than intended." Also missing: in-game menus beyond mission select, and
+MIDI music (the original's music format needs its own synthesizer —
+there's no audio subsystem yet). See
+[`firmware/README.md`](firmware/README.md) for the full list and the
+reasoning behind each scoping decision.
 
 ### Roadmap
 

@@ -897,9 +897,13 @@ void handleTap(int screenX, int screenY)
         int targetIdx = unitIndexAt(mx, my);
         // Attacking is a standalone action from the unit's current tile --
         // this is "move OR attack" per turn, not the original's "move then
-        // attack"; combining the two would mean tracking reachable-attack
-        // range from every tile in the move range, not just the unit's
-        // current one, which is out of scope here.
+        // attack". aiActUnit() below shows the underlying tracking
+        // (reachable-attack range from every tile in the move range,
+        // not just the current one) is doable; this is a deliberate
+        // simplification for human play, not a technical limit -- doing
+        // it live as a human drags a selection around (highlighting
+        // which reachable tiles also open an attack) is more UI than
+        // this milestone scoped.
         if (targetIdx >= 0 && units[targetIdx].color != currentTurn && inAttackRange(units[selectedUnit], mx, my))
         {
             attackUnit(selectedUnit, targetIdx);

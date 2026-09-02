@@ -81,8 +81,12 @@ not yet confirmed on-device.
   applies (`endTurn()` always auto-resolves red's turn through the AI).
   Each AI unit, in order: attacks an enemy already in range from where it
   stands; else, if some reachable tile puts an enemy in range, moves
-  there and attacks (the AI *is* allowed "move then attack" -- see the
-  note on `handleTap()` for why human play doesn't get that); else moves
+  there and attacks (the AI *is* allowed "move then attack" -- for the
+  human side that's a deliberate simplification, not a technical limit:
+  the AI already shows this is doable by scanning every reachable tile
+  for an attack opportunity, but doing that live as a human drags a
+  selection around -- highlighting which of many reachable tiles also
+  opens an attack -- is more UI than this milestone scoped); else moves
   toward the nearest living enemy to close the distance for a later turn;
   else (no enemies left) does nothing. No pathfinding beyond
   `computeReachable()`'s flood fill, no retreat or defensive
