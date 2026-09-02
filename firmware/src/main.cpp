@@ -1,15 +1,19 @@
-// AE2RM ESP32 port -- milestone 5: + building capture, king-death win.
+// AE2RM ESP32 port -- milestone 6: mission menu, all 8 story maps.
 //
-// Tap a unit belonging to the current turn's side to select it: its
-// movement range highlights cyan (terrain-cost-limited flood fill) and any
-// enemy already in its attack range highlights red. Tap a cyan tile to
-// move there (capturing a village/castle you move onto, if this unit type
-// can), tap a red-highlighted enemy to attack it (one action per unit per
-// turn -- this is "move OR attack", not the original's "move then
-// attack"), tap "END TURN" to pass to the other side. A side loses when
-// its king dies -- a simplification of the original's castle-capture-tied
-// defeat condition, see README. Still no AI (two-human hotseat only --
-// see README for why), no menus, and only map m0. Drag still pans camera.
+// Boots to a mission menu (m0.aem-m7.aem, generic "Mission N" labels --
+// the original's mission titles come from a localized string table this
+// firmware doesn't read). Tap one to play: tap a unit belonging to the
+// current turn's side to select it -- its movement range highlights cyan
+// (terrain-cost-limited flood fill) and any enemy already in its attack
+// range highlights red. Tap a cyan tile to move there (capturing a
+// village/castle you move onto, if this unit type can), tap a
+// red-highlighted enemy to attack it (one action per unit per turn --
+// this is "move OR attack", not the original's "move then attack"), tap
+// "END TURN" to pass to the other side. A side loses when its king dies
+// -- a simplification of the original's castle-capture-tied defeat
+// condition, see README -- and tapping the win banner returns to the
+// mission menu. Still no AI (two-human hotseat only -- see README for
+// why) and no other menus. Drag still pans the camera during a mission.
 // See firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
@@ -194,6 +198,18 @@ static int currentTurn = 0;
 
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
 static int viewY = 0;
+
+// m0.aem .. m7.aem -- the story maps loadMap()'s hardcoded 2-side turn
+// queue is exact for (see UnitPlacement's comment). Skirmish maps
+// (s0-s11) aren't converted or offered here.
+constexpr int STORY_MAP_COUNT = 8;
+
+enum AppState
+{
+    STATE_MENU,
+    STATE_PLAYING,
+};
+static AppState appState = STATE_MENU;
 
 bool loadTile(int index)
 {
@@ -555,6 +571,85 @@ void computeReachable(const UnitPlacement &u)
 
 void drawViewport();
 
+constexpr int MENU_ROW_H = 28;
+constexpr int MENU_ROW_TOP = 50;
+
+void drawMenu()
+{
+    gfx.startWrite();
+    gfx.fillScreen(TFT_BLACK);
+    gfx.setTextSize(2);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setCursor(20, 10);
+    gfx.print("AE2RM");
+    gfx.setTextSize(1);
+    gfx.setCursor(20, 30);
+    // Mission titles aren't ported (they come from a localized string
+    // table this firmware doesn't read -- PaintableObject.getLocaleString()
+    // in the original), so these are just generic slots for m0.aem..m7.aem.
+    gfx.print("select a mission");
+
+    for (int i = 0; i < STORY_MAP_COUNT; ++i)
+    {
+        int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
+        gfx.fillRect(20, rowY, DISPLAY_WIDTH - 40, MENU_ROW_H - 6, TFT_DARKGREY);
+        gfx.drawRect(20, rowY, DISPLAY_WIDTH - 40, MENU_ROW_H - 6, TFT_WHITE);
+        gfx.setTextSize(2);
+        gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+        gfx.setCursor(30, rowY + 6);
+        gfx.printf("Mission %d", i + 1);
+    }
+    gfx.endWrite();
+}
+
+// Loads m<mapIndex>.aem and resets all per-game state, then switches to
+// STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
+// across maps and are deliberately NOT reset here.
+void startGame(int mapIndex)
+{
+    char path[24];
+    snprintf(path, sizeof(path), "/maps/m%d.aem", mapIndex);
+
+    gfx.fillScreen(TFT_BLACK);
+    gfx.setTextSize(2);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setCursor(10, 10);
+    gfx.printf("loading mission %d...", mapIndex + 1);
+
+    if (!loadMap(path))
+    {
+        gfx.setCursor(10, 40);
+        gfx.print("map load failed!");
+        delay(2000);
+        drawMenu();
+        return;
+    }
+
+    currentTurn = 0;
+    selectedUnit = -1;
+    gameOver = false;
+    winnerColor = -1;
+    viewX = 0;
+    viewY = 0;
+
+    appState = STATE_PLAYING;
+    gfx.fillScreen(TFT_BLACK);
+    drawViewport();
+}
+
+void handleMenuTap(int screenX, int screenY)
+{
+    for (int i = 0; i < STORY_MAP_COUNT; ++i)
+    {
+        int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
+        if (screenX >= 20 && screenX < DISPLAY_WIDTH - 20 && screenY >= rowY && screenY < rowY + MENU_ROW_H - 6)
+        {
+            startGame(i);
+            return;
+        }
+    }
+}
+
 void endTurn()
 {
     currentTurn = 1 - currentTurn;
@@ -573,9 +668,15 @@ constexpr int HUD_BTN_H = 22;
 constexpr int HUD_BTN_X = DISPLAY_WIDTH - HUD_BTN_W - 4;
 constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
 
-// Handles a tap (as opposed to a drag-to-pan) at the given screen
-// coordinates: the END TURN button, selecting a movable unit belonging to
-// the current turn, or moving the selected unit to a reachable tile.
+// Always-available way back to the mission menu, independent of gameOver.
+// Without this, a mission whose win condition can never trigger (m4/m6
+// place no red units, and their scripted spawns aren't ported -- see
+// README) would trap the player in STATE_PLAYING with no way out.
+constexpr int MENU_BTN_W = 50;
+constexpr int MENU_BTN_H = 16;
+constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;
+constexpr int MENU_BTN_Y = 2;
+
 // If u just moved onto an enemy/neutral fraction building it's equipped to
 // capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
 // and king for villages, king only for castles), flips its ownership to u's
@@ -603,10 +704,28 @@ void tryCaptureBuilding(const UnitPlacement &u)
     Serial.printf("unit captured %s at (%d,%d) for color %d\n", isCastle ? "castle" : "village", u.tileX, u.tileY, u.color);
 }
 
+// Handles a tap (as opposed to a drag-to-pan) at the given screen
+// coordinates: the MENU button, the END TURN button, selecting a movable
+// unit belonging to the current turn, or moving/attacking with it.
 void handleTap(int screenX, int screenY)
 {
-    if (gameOver)
+    if (screenX >= MENU_BTN_X && screenX < MENU_BTN_X + MENU_BTN_W &&
+        screenY >= MENU_BTN_Y && screenY < MENU_BTN_Y + MENU_BTN_H)
+    {
+        appState = STATE_MENU;
+        drawMenu();
         return;
+    }
+
+    if (gameOver)
+    {
+        // Any other tap while the win banner is up also returns to the
+        // menu -- there's no in-place rematch, just start a (possibly
+        // different) mission.
+        appState = STATE_MENU;
+        drawMenu();
+        return;
+    }
 
     if (screenX >= HUD_BTN_X && screenX < HUD_BTN_X + HUD_BTN_W &&
         screenY >= HUD_BTN_Y && screenY < HUD_BTN_Y + HUD_BTN_H)
@@ -766,6 +885,12 @@ void drawViewport()
     gfx.setTextSize(1);
     gfx.setCursor(2, 4);
     gfx.print(currentTurn == 0 ? "BLUE TURN" : "RED TURN");
+
+    gfx.fillRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_DARKGREY);
+    gfx.drawRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_WHITE);
+    gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    gfx.setCursor(MENU_BTN_X + 6, MENU_BTN_Y + 4);
+    gfx.print("MENU");
 
     gfx.fillRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_DARKGREY);
     gfx.drawRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_WHITE);
@@ -935,17 +1060,9 @@ void setup()
             delay(1000);
     }
 
-    if (!loadMap("/maps/m0.aem"))
-    {
-        gfx.println("map load failed!");
-        while (true)
-            delay(1000);
-    }
-
     setupOTA(); // best-effort; game runs offline if this doesn't connect
 
-    gfx.fillScreen(TFT_BLACK);
-    drawViewport();
+    drawMenu();
 }
 
 // A touch that never strays more than this many pixels from where it
@@ -978,7 +1095,9 @@ void loop()
             touchStartY = y;
             isDrag = false;
         }
-        else
+        // The menu has nothing to drag-pan, so only STATE_PLAYING
+        // distinguishes a tap from a drag; every menu touch is a tap.
+        else if (appState == STATE_PLAYING)
         {
             if (!isDrag && (abs(x - touchStartX) > TAP_MOVE_THRESHOLD || abs(y - touchStartY) > TAP_MOVE_THRESHOLD))
                 isDrag = true;
@@ -996,7 +1115,12 @@ void loop()
     else
     {
         if (lastX >= 0 && !isDrag)
-            handleTap(lastX, lastY);
+        {
+            if (appState == STATE_MENU)
+                handleMenuTap(lastX, lastY);
+            else
+                handleTap(lastX, lastY);
+        }
         lastX = lastY = -1;
     }
 
