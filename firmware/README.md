@@ -1,9 +1,10 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 2**
-of that rewrite: terrain (milestone 1) plus each map's starting units,
-rendered statically — still no game rules.
+not an automatic conversion — there's no JVM here. This is **milestone 3**:
+terrain (milestone 1) and units (milestone 2), plus local hotseat
+movement — tap a unit, tap where to move it, tap END TURN to pass to the
+other side. Still no combat, no AI, no menus.
 
 ## Target hardware
 
@@ -35,11 +36,24 @@ not yet confirmed on-device.
 - Starting units drawn as static 24x24 map icons (`unit_icons.png`, one
   of 12 types x 4 team colors) at their map-file position, with
   transparent-pixel blitting so they don't cover terrain with a square
-  background. **The team-color assignment is an approximation** — it uses
-  the map file's raw color slot for each unit record directly, not the
-  original's scripted turn-queue logic (`fractionsTurnQueue` etc. in
-  `MainDisplayable.java`), which isn't ported. No movement, selection, or
-  animation yet -- units just sit where the map placed them.
+  background. **Team-color assignment is exact for story maps** (`m0`-`m7`
+  -- only `m0` is actually converted/loaded by this firmware today, but the
+  mapping holds for the whole set): `MainDisplayable.java`'s `loadMap()`
+  always hardcodes the same 2-side turn queue for these (raw color 0 =
+  blue, 1 = red), so using each unit record's raw color slot directly is
+  correct here — it would NOT be for skirmish maps (`s0`-`s11`, not
+  converted/loaded), which build a real building-derived queue for up to
+  4 sides; that logic isn't ported.
+- Local hotseat movement (`firmware/src/main.cpp`): tap a unit belonging
+  to the side whose turn it is to select it; its movement range lights up
+  cyan, terrain-cost-limited by `UNIT_MOVE_RANGE` per unit type and
+  `TERRAIN_MOVE_COST` per tile type (both taken directly from the
+  original's `.unit` files and `tiles0.prop` — see the tables' comments
+  in `main.cpp`). Tap a highlighted tile to move there; tap END TURN to
+  pass to the other side and let its units move. **No combat, and no
+  AI** — the two sides are both driven by whoever is holding the device;
+  porting the original's AI (a large scoring heuristic spanning much of
+  `MainDisplayable.java`) is out of scope here.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
@@ -49,12 +63,13 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-The actual game: movement, combat, buildings, turns, the correct
-team-color/turn-queue logic, the HUD, menus, MIDI music (needs its own
-synth — see the "Music" question this was scoped against), and every map
-past `m0`. The original `MainDisplayable.java` is ~11,000 lines covering
-all of that; this milestone only reads its map-loading format, terrain
-layer, and unit starting positions.
+Combat, buildings/capture, an AI opponent, the HUD beyond the turn
+indicator and END TURN button, menus, MIDI music (needs its own synth —
+see the "Music" question this was scoped against), and every map past
+`m0`. The original `MainDisplayable.java` is ~11,000 lines covering all
+of that; this milestone only reads its map-loading format, terrain
+layer, unit starting positions, and enough movement rules for two people
+to pass a device back and forth.
 
 ## Build & flash
 
@@ -123,18 +138,20 @@ bad state.
 This was built and the asset converter was run and its output checked
 (header parses to the expected 12x12 map, m0's 6 unit records parse to
 plausible type/color/tile values, tile and unit-icon files are the
-expected size). **It has not been flashed to or run on physical
+expected size). The terrain-cost and unit-move-range tables in
+`main.cpp` were cross-checked field-by-field against `tiles0.prop` and
+each `*.unit` file. **It has not been flashed to or run on physical
 hardware** — this session has no access to your board. Display/touch
 pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
 first and report back what you see. The SD/MMC init, tile/unit
-rendering, touch-pan loop, and OTA path are the things most likely to
-need a follow-up fix once you can see real output.
+rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
+`main.cpp` is a guess), and OTA path are the things most likely to need
+a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 
-1. Get milestone 2 actually rendering on your hardware (terrain + units),
-   fix pins/driver quirks that only show up on real silicon
-2. Port turn/movement rules from `MainDisplayable.java` for a single map,
-   including the real team-color/turn-queue logic this milestone
-   approximates
-3. Menus, HUD, remaining maps, combat, music
+1. Get milestone 3 actually rendering and responding to touch on your
+   hardware (terrain + units + movement), fix pins/driver/touch-threshold
+   quirks that only show up on real silicon
+2. Combat and buildings/capture for a single map
+3. Menus, HUD, remaining maps, an AI opponent, music
