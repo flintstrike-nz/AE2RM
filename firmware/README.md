@@ -59,8 +59,10 @@ not yet confirmed on-device.
   the defender's `UNIT_DEFENCE` plus `TERRAIN_DEFENCE_BONUS` for the tile
   it's standing on, scaled by the attacker's current health% — but
   **without** the original's per-property matchup bonuses (mounted vs.
-  ground, golem vs. skeleton, water/swamp bonuses, etc.), which depend on
-  per-unit property flags this milestone doesn't read. A surviving
+  ground, golem vs. skeleton, water/swamp bonuses, etc.). These depend on
+  the same `UNIT_PROPERTIES` bit flags milestone 5 reads for capture
+  eligibility (below) -- the bits combat would need are just not
+  interpreted here; only the capture-related ones are. A surviving
   defender counterattacks if adjacent (`Unit.canPerformCloseAttack()`:
   melee-only, and only if the defender's own `MIN_ATTACK_RANGE` is 1 --
   the catapult, for example, can never counterattack). A unit at 0 health
