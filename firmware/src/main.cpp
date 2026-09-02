@@ -1,10 +1,13 @@
-// AE2RM ESP32 port -- milestone 3: local hotseat movement, no combat/AI.
+// AE2RM ESP32 port -- milestone 4: local hotseat movement + combat, no AI.
 //
-// Tap a unit belonging to the current turn's side to select it and see its
-// movement range (terrain-cost-limited flood fill), tap a highlighted tile
-// to move it there, tap the "END TURN" button to pass to the other side.
-// There is still no combat, no AI (this is two-human hotseat only -- see
-// README for why), no menus, and only map m0. Drag still pans the camera.
+// Tap a unit belonging to the current turn's side to select it: its
+// movement range highlights cyan (terrain-cost-limited flood fill) and any
+// enemy already in its attack range highlights red. Tap a cyan tile to
+// move there, tap a red-highlighted enemy to attack it (one action per
+// unit per turn -- this is "move OR attack", not the original's "move
+// then attack"), tap "END TURN" to pass to the other side. Still no AI
+// (two-human hotseat only -- see README for why), no buildings/capture,
+// no menus, and only map m0. Drag still pans the camera.
 // See firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
@@ -80,6 +83,8 @@ struct UnitPlacement
     int16_t tileX;
     int16_t tileY;
     bool hasMoved;
+    bool alive;
+    uint8_t health; // 0-100, matches Unit.java's percentage scale
 };
 constexpr int MAX_UNITS = 64;
 static UnitPlacement units[MAX_UNITS];
@@ -93,6 +98,7 @@ static int unitCount = 0;
 // constants, but every current map uses tiles0.
 constexpr int TERRAIN_TYPE_COUNT = 11;
 static const uint8_t TERRAIN_MOVE_COST[TERRAIN_TYPE_COUNT] = {1, 1, 2, 2, 3, 3, 1, 1, 1, 1, 3};
+static const int8_t TERRAIN_DEFENCE_BONUS[TERRAIN_TYPE_COUNT] = {0, 5, 10, 10, 15, 0, 5, 15, 15, 15, -15};
 static const uint8_t TILE_TERRAIN_TYPE[TILE_COUNT] = {
     5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, // 00-14: water
     2, 2,                                        // 15-16: woods
@@ -115,6 +121,17 @@ static const uint8_t TILE_TERRAIN_TYPE[TILE_COUNT] = {
 // golem, catapult, wyvern, king, skeleton, crystall (from each unit's
 // "MoveRange" line in its .unit file).
 static const uint8_t UNIT_MOVE_RANGE[UNIT_TYPE_COUNT] = {5, 5, 5, 5, 5, 6, 5, 4, 7, 5, 5, 4};
+
+// Combat stats, from each unit's "Attack min max" / "Defence" /
+// "AttackRange max min" lines. crystall (index 11) has 0/0/0/0 in its
+// .unit file -- it's the non-combat "crystal escort" objective piece, not
+// a fighting unit, and MAX_ATTACK_RANGE 0 naturally keeps it from ever
+// being a valid attacker here.
+static const uint8_t UNIT_OFFENCE_MIN[UNIT_TYPE_COUNT] = {50, 50, 50, 40, 35, 60, 60, 50, 70, 55, 40, 0};
+static const uint8_t UNIT_OFFENCE_MAX[UNIT_TYPE_COUNT] = {55, 55, 55, 45, 40, 65, 70, 70, 80, 65, 50, 0};
+static const uint8_t UNIT_DEFENCE[UNIT_TYPE_COUNT] = {5, 5, 10, 5, 10, 15, 30, 10, 25, 20, 2, 15};
+static const uint8_t UNIT_ATTACK_RANGE_MAX[UNIT_TYPE_COUNT] = {1, 2, 1, 1, 1, 1, 1, 4, 1, 1, 1, 0};
+static const uint8_t UNIT_ATTACK_RANGE_MIN[UNIT_TYPE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0};
 
 // Movement points remaining when the currently selected unit could reach
 // [x*mapHeight+y], or -1 if unreachable. Lazily allocated/resized to match
@@ -253,6 +270,9 @@ void loadUnitPlacements(File &f, const char *path)
         units[unitCount].color = color;
         units[unitCount].tileX = xPx / TILE_SIZE;
         units[unitCount].tileY = yPx / TILE_SIZE;
+        units[unitCount].hasMoved = false;
+        units[unitCount].alive = true;
+        units[unitCount].health = 100;
         ++unitCount;
     }
 
@@ -341,10 +361,78 @@ int unitIndexAt(int mx, int my)
 {
     for (int i = 0; i < unitCount; ++i)
     {
-        if (units[i].tileX == mx && units[i].tileY == my)
+        if (units[i].alive && units[i].tileX == mx && units[i].tileY == my)
             return i;
     }
     return -1;
+}
+
+inline int manhattanDist(int x1, int y1, int x2, int y2)
+{
+    return abs(x1 - x2) + abs(y1 - y2);
+}
+
+bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
+{
+    int d = manhattanDist(attacker.tileX, attacker.tileY, tx, ty);
+    return d >= UNIT_ATTACK_RANGE_MIN[attacker.type] && d <= UNIT_ATTACK_RANGE_MAX[attacker.type] && UNIT_ATTACK_RANGE_MAX[attacker.type] > 0;
+}
+
+// Resolves units[attackerIdx] attacking units[victimIdx], matching the
+// core of Unit.java's attackUnit(): a random roll in [offenceMin,
+// offenceMax) against the victim's defence (base + terrain bonus), scaled
+// by the attacker's current health%. Deliberately does NOT port the
+// original's per-property matchup bonuses (mounted-vs-ground,
+// golem-vs-skeleton, water/swamp bonuses, etc. -- see Unit.java's
+// getOffenceBonusAgainstUnit()); those depend on per-unit HasProperty
+// flags this milestone doesn't read.
+// One hit: attackerIdx's roll in [offenceMin, offenceMax) against
+// victimIdx's defence (base + terrain bonus), scaled by the attacker's
+// current health%. Shared by attackUnit()'s direct hit and its
+// counterattack.
+void resolveHit(int attackerIdx, int victimIdx)
+{
+    UnitPlacement &attacker = units[attackerIdx];
+    UnitPlacement &victim = units[victimIdx];
+
+    int offence = random(UNIT_OFFENCE_MIN[attacker.type], UNIT_OFFENCE_MAX[attacker.type]);
+    uint8_t victimTile = tileAt(victim.tileX, victim.tileY);
+    // Same guard as computeReachable()'s: a corrupt/out-of-range tile index
+    // shouldn't read past TILE_TERRAIN_TYPE/TERRAIN_DEFENCE_BONUS -- treat
+    // it as no terrain bonus rather than crashing mid-combat.
+    int terrainBonus = victimTile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[victimTile]] : 0;
+    int defence = UNIT_DEFENCE[victim.type] + terrainBonus;
+
+    int hit = (offence - defence) * attacker.health / 100;
+    hit = constrain(hit, 0, (int)victim.health);
+
+    victim.health -= hit;
+    Serial.printf("attack: unit %d (type %d) hits unit %d (type %d) for %d (hp now %d)\n",
+                  attackerIdx, attacker.type, victimIdx, victim.type, hit, victim.health);
+
+    if (victim.health == 0)
+        victim.alive = false;
+}
+
+// Resolves attackerIdx attacking victimIdx, then victimIdx's counterattack
+// if it's still alive and eligible -- matching Unit.java's
+// canPerformCloseAttack(): adjacent (distance == 1, regardless of the
+// attacker's own attack range) AND the victim's own MIN_ATTACK_RANGE is 1
+// (a ranged-only unit like the catapult, MIN_ATTACK_RANGE 2, can never
+// counter). Not ported: canPerformCloseAttack() also checks the victim's
+// unitState != 4, a status-effect flag this milestone doesn't model.
+void attackUnit(int attackerIdx, int victimIdx)
+{
+    resolveHit(attackerIdx, victimIdx);
+
+    UnitPlacement &attacker = units[attackerIdx];
+    UnitPlacement &victim = units[victimIdx];
+    if (victim.alive &&
+        manhattanDist(victim.tileX, victim.tileY, attacker.tileX, attacker.tileY) == 1 &&
+        UNIT_ATTACK_RANGE_MIN[victim.type] == 1)
+    {
+        resolveHit(victimIdx, attackerIdx);
+    }
 }
 
 // Flood-fills how far `u` could move this turn, terrain-cost-limited by
@@ -451,7 +539,18 @@ void handleTap(int screenX, int screenY)
 
     if (selectedUnit >= 0)
     {
-        if (reachableCost && reachableCost[mx * mapHeight + my] >= 0 && unitIndexAt(mx, my) < 0)
+        int targetIdx = unitIndexAt(mx, my);
+        // Attacking is a standalone action from the unit's current tile --
+        // this is "move OR attack" per turn, not the original's "move then
+        // attack"; combining the two would mean tracking reachable-attack
+        // range from every tile in the move range, not just the unit's
+        // current one, which is out of scope here.
+        if (targetIdx >= 0 && units[targetIdx].color != currentTurn && inAttackRange(units[selectedUnit], mx, my))
+        {
+            attackUnit(selectedUnit, targetIdx);
+            units[selectedUnit].hasMoved = true;
+        }
+        else if (reachableCost && reachableCost[mx * mapHeight + my] >= 0 && targetIdx < 0)
         {
             units[selectedUnit].tileX = (int16_t)mx;
             units[selectedUnit].tileY = (int16_t)my;
@@ -496,7 +595,8 @@ void drawViewport()
     }
     for (int i = 0; i < unitCount; ++i)
     {
-        if (units[i].tileX >= firstCol && units[i].tileX < firstCol + cols &&
+        if (units[i].alive &&
+            units[i].tileX >= firstCol && units[i].tileX < firstCol + cols &&
             units[i].tileY >= firstRow && units[i].tileY < firstRow + rows)
         {
             loadUnitIcon(units[i].color, units[i].type);
@@ -553,15 +653,26 @@ void drawViewport()
     for (int i = 0; i < unitCount; ++i)
     {
         const UnitPlacement &u = units[i];
-        if (!unitIconLoaded[u.color][u.type])
-            continue; // out of view this frame, or failed to load
+        if (!u.alive || !unitIconLoaded[u.color][u.type])
+            continue; // dead, out of view this frame, or failed to load
         int px = u.tileX * TILE_SIZE - viewX;
         int py = u.tileY * TILE_SIZE - viewY;
         if (px <= -UNIT_ICON_SIZE || py <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
             continue;
         gfx.pushImage(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, unitIconFrame(u.color, u.type), TRANSPARENT_565);
+
         if (i == selectedUnit)
             gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_YELLOW);
+        else if (selectedUnit >= 0 && u.color != currentTurn && inAttackRange(units[selectedUnit], u.tileX, u.tileY))
+            gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_RED); // valid attack target this turn
+
+        if (u.health < 100)
+        {
+            int barY = py + UNIT_ICON_SIZE - 3;
+            gfx.fillRect(px, barY, UNIT_ICON_SIZE, 3, TFT_BLACK);
+            int filled = (UNIT_ICON_SIZE - 2) * u.health / 100;
+            gfx.fillRect(px + 1, barY + 1, filled, 1, u.health > 33 ? TFT_GREEN : TFT_RED);
+        }
     }
 
     // HUD: fixed screen-space overlay, always on top, not affected by scroll.

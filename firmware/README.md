@@ -1,10 +1,11 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 3**:
-terrain (milestone 1) and units (milestone 2), plus local hotseat
-movement — tap a unit, tap where to move it, tap END TURN to pass to the
-other side. Still no combat, no AI, no menus.
+not an automatic conversion — there's no JVM here. This is **milestone 4**:
+terrain (milestone 1), units (milestone 2), movement (milestone 3), plus
+combat — select a unit, move it or attack an enemy already in range, tap
+END TURN to pass to the other side. Still no buildings/capture, no AI, no
+menus.
 
 ## Target hardware
 
@@ -50,10 +51,27 @@ not yet confirmed on-device.
   `TERRAIN_MOVE_COST` per tile type (both taken directly from the
   original's `.unit` files and `tiles0.prop` — see the tables' comments
   in `main.cpp`). Tap a highlighted tile to move there; tap END TURN to
-  pass to the other side and let its units move. **No combat, and no
-  AI** — the two sides are both driven by whoever is holding the device;
-  porting the original's AI (a large scoring heuristic spanning much of
-  `MainDisplayable.java`) is out of scope here.
+  pass to the other side and let its units move.
+- Combat: any enemy unit already within the selected unit's attack range
+  (`UNIT_ATTACK_RANGE_MIN`/`MAX` per type — e.g. archers can hit at 1-2
+  tiles, the catapult only at 2-4) highlights red and is a valid tap
+  target instead of a move. Damage follows the core of the original's
+  `Unit.attackUnit()`: a random roll in `[offenceMin, offenceMax)` against
+  the defender's `UNIT_DEFENCE` plus `TERRAIN_DEFENCE_BONUS` for the tile
+  it's standing on, scaled by the attacker's current health% — but
+  **without** the original's per-property matchup bonuses (mounted vs.
+  ground, golem vs. skeleton, water/swamp bonuses, etc.), which depend on
+  per-unit property flags this milestone doesn't read. A surviving
+  defender counterattacks if adjacent (`Unit.canPerformCloseAttack()`:
+  melee-only, and only if the defender's own `MIN_ATTACK_RANGE` is 1 --
+  the catapult, for example, can never counterattack). A unit at 0 health
+  is removed. Damaged units show a small health bar. This is "move OR
+  attack" per turn, not the original's "move then attack" -- combining
+  the two would need tracking attack range from every tile in the move
+  range, not just the unit's current one, which is out of scope here.
+- **Still no AI** — both sides are driven by whoever is holding the
+  device; porting the original's AI (a large scoring heuristic spanning
+  much of `MainDisplayable.java`) is out of scope for this port so far.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
@@ -63,13 +81,15 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-Combat, buildings/capture, an AI opponent, the HUD beyond the turn
-indicator and END TURN button, menus, MIDI music (needs its own synth —
-see the "Music" question this was scoped against), and every map past
-`m0`. The original `MainDisplayable.java` is ~11,000 lines covering all
-of that; this milestone only reads its map-loading format, terrain
-layer, unit starting positions, and enough movement rules for two people
-to pass a device back and forth.
+Buildings/capture, victory/defeat conditions (a king can be reduced to 0
+health but nothing ends the game), the combat property bonuses noted
+above, an AI opponent, the HUD beyond the turn indicator and END TURN
+button, menus, MIDI music (needs its own synth — see the "Music" question
+this was scoped against), and every map past `m0`. The original
+`MainDisplayable.java` is ~11,000 lines covering all of that; this
+milestone only reads its map-loading format, terrain layer, unit starting
+positions, and enough movement/combat rules for two people to pass a
+device back and forth.
 
 ## Build & flash
 
@@ -138,20 +158,20 @@ bad state.
 This was built and the asset converter was run and its output checked
 (header parses to the expected 12x12 map, m0's 6 unit records parse to
 plausible type/color/tile values, tile and unit-icon files are the
-expected size). The terrain-cost and unit-move-range tables in
-`main.cpp` were cross-checked field-by-field against `tiles0.prop` and
-each `*.unit` file. **It has not been flashed to or run on physical
-hardware** — this session has no access to your board. Display/touch
-pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
-first and report back what you see. The SD/MMC init, tile/unit
-rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
-`main.cpp` is a guess), and OTA path are the things most likely to need
-a follow-up fix once you can see real output.
+expected size). The terrain-cost, unit-move-range, and combat-stat
+(offence/defence/attack-range) tables in `main.cpp` were cross-checked
+field-by-field against `tiles0.prop` and each `*.unit` file. **It has
+not been flashed to or run on physical hardware** — this session has no
+access to your board. Display/touch pins are confirmed; SD/MMC pins and
+WiFi/OTA are not — flash over USB first and report back what you see.
+The SD/MMC init, tile/unit rendering, tap-vs-drag detection (the
+`TAP_MOVE_THRESHOLD` in `main.cpp` is a guess), and OTA path are the
+things most likely to need a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 
-1. Get milestone 3 actually rendering and responding to touch on your
-   hardware (terrain + units + movement), fix pins/driver/touch-threshold
-   quirks that only show up on real silicon
-2. Combat and buildings/capture for a single map
+1. Get milestone 4 actually rendering and responding to touch on your
+   hardware (terrain + units + movement + combat), fix pins/driver/
+   touch-threshold quirks that only show up on real silicon
+2. Buildings/capture and win/loss conditions for a single map
 3. Menus, HUD, remaining maps, an AI opponent, music
