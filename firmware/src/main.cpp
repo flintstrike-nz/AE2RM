@@ -1,24 +1,30 @@
-// AE2RM ESP32 port -- milestone 7: single-player vs. a basic AI.
+// AE2RM ESP32 port -- milestone 10: single-player vs. a basic AI, plus
+// m0's mission-script intro cutscene.
 //
-// Boots to a mission menu (m0.aem-m7.aem, generic "Mission N" labels --
-// the original's mission titles come from a localized string table this
-// firmware doesn't read). Tap one to play: you are always blue, the
-// computer is always red. Tap a unit belonging to the current turn's
-// side to select it -- its movement range highlights cyan
-// (terrain-cost-limited flood fill) and any enemy already in its attack
-// range highlights red. Tap a cyan tile to move there (capturing a
-// village/castle you move onto, if this unit type can), tap a
-// red-highlighted enemy to attack it (one action per unit per turn --
+// Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
+// when /strings.dat loaded -- see loadStrings() -- else a generic
+// "Mission N" label). Tap one to play: you are always blue, the computer
+// is always red. m0 additionally runs its mission-script's intro cutscene
+// once at mission start (see runIntroScript()) before handing control to
+// you -- real dialog text, a couple of scripted unit moves/removals, and
+// camera pans; the other 7 maps start playable immediately. Tap a unit
+// belonging to the current turn's side to select it -- its movement range
+// highlights cyan (terrain-cost-limited flood fill) and any enemy already
+// in its attack range highlights red. Tap a cyan tile to move there
+// (capturing a village/castle you move onto, if this unit type can), tap
+// a red-highlighted enemy to attack it (one action per unit per turn --
 // this is "move OR attack", not the original's "move then attack"), tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
-// (attack in range, else move-and-attack, else close the distance -- see
+// (attack the weakest in-range enemy, else move-and-attack, else retreat
+// if critically low on health, else close the distance -- see
 // aiActUnit()'s comment; not a port of the original's scoring-heuristic
-// AI) and hands back control. A side loses when its king dies -- a
-// simplification of the original's castle-capture-tied defeat condition,
-// see README -- and tapping the win banner, or the always-available MENU
-// button, returns to the mission menu. Drag still pans the camera during
-// a mission. See firmware/README.md for what's implemented and what's
-// next.
+// AI) and hands back control. Tap any other living unit (an enemy, or
+// one that's already moved) to see its stats instead. A side loses when
+// its king dies -- a simplification of the original's
+// castle-capture-tied defeat condition, see README -- and tapping the
+// win banner, or the always-available MENU button, returns to the
+// mission menu. Drag still pans the camera during a mission. See
+// firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -636,6 +642,22 @@ bool loadStrings()
     }
     uint32_t count = (uint32_t(hdr[0]) << 24) | (uint32_t(hdr[1]) << 16) | (uint32_t(hdr[2]) << 8) | hdr[3];
 
+    // The header count comes straight off the SD card -- untrusted. Every
+    // record costs at least 2 bytes (a zero-length string's length
+    // prefix), so a count that couldn't possibly fit in the file's
+    // remaining bytes is corrupt; reject it before it's used to size the
+    // offsets allocation (count+1 on a bogus multi-billion count would
+    // overflow size_t on this 32-bit target and under-allocate, then the
+    // read loop below would walk off the end of that buffer).
+    size_t remaining = f.size() - 4;
+    if (count > remaining / 2)
+    {
+        Serial.printf("strings.dat: implausible string count %u for a %u-byte file\n",
+                       (unsigned)count, (unsigned)f.size());
+        f.close();
+        return false;
+    }
+
     // Concatenated-with-NUL-terminators bytes can't exceed the file's
     // remaining size (each string costs len+1 bytes in the buffer vs.
     // len+2 in the file, i.e. one *less* byte per string) -- f.size() is a
@@ -666,14 +688,21 @@ bool loadStrings()
         pos += len;
         buf[pos++] = '\0';
     }
-    offsets[i] = (uint32_t)pos; // one-past-the-last-loaded string's end
     f.close();
 
     if (i < count)
     {
-        Serial.printf("strings.dat: truncated after %u/%u strings\n", (unsigned)i, (unsigned)count);
-        count = i; // still usable -- just fewer strings than the header claimed
+        // A partial table would make getScriptString() return "" for any
+        // index past the truncation point -- ShowDialog would render an
+        // empty box instead of the "cutscene skipped" fallback this
+        // function's callers actually expect on a load failure. Reject
+        // the whole table rather than serving a silently incomplete one.
+        Serial.printf("strings.dat: truncated after %u/%u strings, rejecting table\n", (unsigned)i, (unsigned)count);
+        free(buf);
+        free(offsets);
+        return false;
     }
+    offsets[count] = (uint32_t)pos; // one-past-the-last string's end
 
     scriptStrings = buf;
     scriptStringOffsets = offsets;
@@ -811,9 +840,18 @@ void showScriptDialog(const char *text)
     gfx.print("[tap to continue]");
     gfx.endWrite();
 
+    // ArduinoOTA.handle() is normally only serviced from loop() -- this
+    // blocking wait has to call it itself, or leaving a dialog open would
+    // make the board unreachable over OTA for as long as the player
+    // doesn't tap. Bailing out on otaInProgress (rather than continuing to
+    // poll touch/redraw) matches loop()'s own rule of leaving the
+    // display/SD alone once a flash write has actually started.
     bool wasDown = false;
     for (;;)
     {
+        ArduinoOTA.handle();
+        if (otaInProgress)
+            break;
         int32_t x, y;
         bool down = gfx.getTouch(&x, &y);
         if (!down && wasDown)
@@ -858,6 +896,12 @@ void runIntroScript()
     char line[96];
     while (readScriptLine(f, line, sizeof(line)))
     {
+        // showScriptDialog() already bails out of its own wait on
+        // otaInProgress; check again here so a Wait/camera-pan/etc.
+        // between dialogs doesn't keep touching the display/SD once a
+        // flash write has actually started.
+        if (otaInProgress)
+            break;
         if (line[0] == '\0')
             continue;
         if (!strncmp(line, "@Case", 5))
@@ -962,7 +1006,8 @@ void runIntroScript()
         // function's doc comment -- and is silently skipped.
     }
     f.close();
-    drawViewport();
+    if (!otaInProgress)
+        drawViewport();
 }
 
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to

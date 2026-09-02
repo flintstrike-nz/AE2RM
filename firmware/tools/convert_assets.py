@@ -152,10 +152,18 @@ def main():
     # dialog text (PaintableObject.getLocaleString()) and the mission
     # menu's titles (indices 121-128, one per m0.aem..m7.aem -- see
     # MainDisplayable.java's `getLocaleString(121 + mission)`).
+    strings_out = os.path.join(OUT_DIR, "strings.dat")
     if os.path.isfile(LANG_PATH):
-        shutil.copyfile(LANG_PATH, os.path.join(OUT_DIR, "strings.dat"))
+        shutil.copyfile(LANG_PATH, strings_out)
         print("copied lang.dat -> strings.dat")
     else:
+        # OUT_DIR persists across runs (it's not wiped at the top of
+        # main()) -- if a previous run wrote strings.dat and this one
+        # can't find lang.dat, leaving the old file in place would ship a
+        # stale table silently instead of the fallback this warning
+        # describes.
+        if os.path.isfile(strings_out):
+            os.remove(strings_out)
         print(f"WARNING: {LANG_PATH} not found -- skipping strings.dat "
               "(mission menu falls back to generic titles, m0's intro "
               "cutscene won't have dialog text)")
@@ -165,9 +173,13 @@ def main():
     # Only m0 has a mission-script file in the source archive (see the root
     # README's roadmap) -- the firmware only looks for m0.script.
     m0_script = os.path.join(RES_DIR, "m0.script")
+    m0_script_out = os.path.join(scripts_out, "m0.script")
     if os.path.isfile(m0_script):
-        shutil.copyfile(m0_script, os.path.join(scripts_out, "m0.script"))
+        shutil.copyfile(m0_script, m0_script_out)
         print("copied m0.script")
+    elif os.path.isfile(m0_script_out):
+        # Same stale-output concern as strings.dat above.
+        os.remove(m0_script_out)
 
     print(f"\nDone. Copy the contents of {OUT_DIR} onto the microSD card root.")
 
