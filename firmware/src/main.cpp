@@ -1,4 +1,4 @@
-// AE2RM ESP32 port -- milestone 12: single-player vs. a basic AI, plus
+// AE2RM ESP32 port -- milestone 13: single-player vs. a basic AI, plus
 // m0's mission-script intro cutscene.
 //
 // Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
@@ -15,10 +15,11 @@
 // a red-highlighted enemy to attack it (one action per unit per turn --
 // this is "move OR attack", not the original's "move then attack"), tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
-// (attack the weakest in-range enemy, else move-and-attack, else retreat
-// if critically low on health, else close the distance -- see
-// aiActUnit()'s comment; not a port of the original's scoring-heuristic
-// AI) and hands back control. A living-unit-count readout next to the
+// (attack a guaranteed kill if one's in range, else the weakest in-range
+// enemy, else move-and-attack, else retreat if critically low on health,
+// else close the distance -- see aiActUnit()'s comment; not a port of
+// the original's scoring-heuristic AI) and hands back control. A
+// living-unit-count readout next to the
 // turn indicator (blue:red, colors 0/1 only) tracks how the battle
 // stands. Tap any other living unit (an enemy, or one that's already
 // moved) to see its stats instead. A side loses when
@@ -1079,25 +1080,52 @@ void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the A
 // the two-human hotseat mode earlier milestones had no longer applies.
 constexpr int AI_COLOR = 1;
 
-// Returns the index of the lowest-health living enemy of `color` that a
-// unit of `type` standing at (fromX,fromY) could attack, or -1 if none
-// are in range. "Weakest by current health" is the one prioritization
-// this AI does -- it's not the original's scoring heuristic (sub_10cb()
-// and friends in MainDisplayable.java, which weighs many more factors
-// and isn't ported), just a cheap, obviously-better-than-arbitrary rule:
-// finishing off a damaged unit removes it from the board for good,
-// whereas splitting damage across several full-health enemies doesn't.
-int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
+// True if attackerType/attackerHealth attacking victimIdx is guaranteed to
+// kill it no matter how resolveHit()'s random() roll comes out -- using
+// UNIT_OFFENCE_MIN (the floor of that roll) against the same
+// terrain-adjusted defence resolveHit() itself computes, scaled by
+// attacker health the same way. A worst-case-roll kill is a genuinely
+// certain one, not a probability estimate.
+bool wouldGuaranteeKill(uint8_t attackerType, uint8_t attackerHealth, int victimIdx)
+{
+    const UnitPlacement &victim = units[victimIdx];
+    uint8_t tile = tileAt(victim.tileX, victim.tileY);
+    int terrainBonus = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
+    int defence = UNIT_DEFENCE[victim.type] + terrainBonus;
+    int minHit = (UNIT_OFFENCE_MIN[attackerType] - defence) * attackerHealth / 100;
+    return minHit >= victim.health;
+}
+
+// Returns the index of the best living enemy of `color` that a unit of
+// `type`/`health` standing at (fromX,fromY) could attack, or -1 if none
+// are in range. "Best" ranks a guaranteed kill (see wouldGuaranteeKill())
+// above anything that's merely damage -- securing a kill is strictly
+// better than a bigger wound on a different target, whatever their
+// relative health -- and falls back to the lowest-health target as
+// before when neither or both candidates are guaranteed kills. Still not
+// the original's scoring heuristic (sub_10cb() and friends in
+// MainDisplayable.java, which weighs many more factors and isn't
+// ported), just a cheap, obviously-better-than-arbitrary pair of rules.
+int findAttackTarget(uint8_t type, uint8_t health, int color, int fromX, int fromY)
 {
     int best = -1;
+    bool bestIsKill = false;
     for (int i = 0; i < unitCount; ++i)
     {
         if (!units[i].alive || units[i].color == color)
             continue;
         if (!inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
             continue;
-        if (best < 0 || units[i].health < units[best].health)
+
+        bool isKill = wouldGuaranteeKill(type, health, i);
+        bool better = best < 0 ||
+                      (isKill && !bestIsKill) ||
+                      (isKill == bestIsKill && units[i].health < units[best].health);
+        if (better)
+        {
             best = i;
+            bestIsKill = isKill;
+        }
     }
     return best;
 }
@@ -1108,12 +1136,14 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //      there and attack (this AI is allowed the original's "move then
 //      attack" -- see the note on handleTap() for why human play doesn't
 //      get that). Every reachable attack-capable tile is checked, not just
-//      the first found, and the one whose target has the lowest health
-//      wins -- so this path shares findAttackTarget()'s weakest-first rule
-//      instead of taking whatever attack the scan order turns up first.
-//      Among tiles tying on target health, the one with the best terrain
-//      defence bonus for THIS unit wins -- a free tiebreak, not a real
-//      lookahead at whether a counterattack will actually land.
+//      the first found: a tile reaching a target this unit is guaranteed
+//      to kill (wouldGuaranteeKill() -- true if even the worst-case damage
+//      roll finishes it) always wins over one that only wounds; among
+//      ties on that, the target's lowest health wins as before
+//      (findAttackTarget()'s rule); among ties on THAT, the tile with the
+//      best terrain defence bonus for THIS unit wins -- a free tiebreak,
+//      not a real lookahead at whether a counterattack will actually
+//      land.
 //   3. Otherwise, if this unit's health is critically low (<=25), move to
 //      whichever reachable tile MAXIMIZES its distance to the CLOSEST
 //      living enemy (checked against every enemy, not just the one
@@ -1129,13 +1159,13 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //   5. If no enemies remain, do nothing.
 // No pathfinding beyond computeReachable()'s flood fill, no coordination
 // between units, no target prioritization beyond findAttackTarget()'s
-// weakest-first rule. This is enough to make single-player winnable and
-// losable, not a port of the original's AI.
+// guaranteed-kill-then-weakest rule. This is enough to make
+// single-player winnable and losable, not a port of the original's AI.
 void aiActUnit(int idx)
 {
     UnitPlacement &u = units[idx];
 
-    int target = findAttackTarget(u.type, u.color, u.tileX, u.tileY);
+    int target = findAttackTarget(u.type, u.health, u.color, u.tileX, u.tileY);
     if (target >= 0)
     {
         attackUnit(idx, target);
@@ -1181,6 +1211,7 @@ void aiActUnit(int idx)
     int bestApproachDist = nearestDist;  // used only when !retreating
     int bestRetreatMinDist = -1;         // used only when retreating
     int attackTileX = -1, attackTileY = -1, attackTargetHealth = INT32_MAX, attackTileDefBonus = INT32_MIN;
+    bool attackTileIsKill = false;
     for (int x = 0; x < mapWidth; ++x)
     {
         for (int y = 0; y < mapHeight; ++y)
@@ -1190,29 +1221,34 @@ void aiActUnit(int idx)
             if (unitIndexAt(x, y) >= 0 && !(x == u.tileX && y == u.tileY))
                 continue;
 
-            int tileTarget = findAttackTarget(u.type, u.color, x, y);
+            int tileTarget = findAttackTarget(u.type, u.health, u.color, x, y);
             if (tileTarget >= 0)
             {
-                // Weakest target wins as before; among tiles tying on that,
-                // prefer the one with the best terrain defence bonus for
-                // THIS unit -- it's the tile a counterattack (if the target
-                // survives and is close-range-eligible) would land on, per
-                // resolveHit()'s own terrain lookup on the defender's tile.
-                // Not a full lookahead (doesn't know if a counter will
-                // actually happen, or weigh this against reaching a weaker
-                // target elsewhere), just a free tiebreak among otherwise
-                // equal attack options.
+                // A tile reaching a guaranteed kill (see wouldGuaranteeKill())
+                // beats one that only wounds, whatever the health numbers;
+                // among tiles tying on that, the weakest target wins as
+                // before, and among ties on THAT, prefer the tile with the
+                // best terrain defence bonus for THIS unit -- the tile a
+                // counterattack (if the target survives and is
+                // close-range-eligible) would land on, per resolveHit()'s
+                // own terrain lookup on the defender's tile. Not a full
+                // lookahead (doesn't know if a counter will actually
+                // happen), just a free tiebreak among otherwise equal
+                // attack options.
+                bool isKill = wouldGuaranteeKill(u.type, u.health, tileTarget);
                 uint8_t tile = tileAt(x, y);
                 int defBonus = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
                 bool better = attackTileX < 0 ||
-                              units[tileTarget].health < attackTargetHealth ||
-                              (units[tileTarget].health == attackTargetHealth && defBonus > attackTileDefBonus);
+                              (isKill && !attackTileIsKill) ||
+                              (isKill == attackTileIsKill && units[tileTarget].health < attackTargetHealth) ||
+                              (isKill == attackTileIsKill && units[tileTarget].health == attackTargetHealth && defBonus > attackTileDefBonus);
                 if (better)
                 {
                     attackTileX = x;
                     attackTileY = y;
                     attackTargetHealth = units[tileTarget].health;
                     attackTileDefBonus = defBonus;
+                    attackTileIsKill = isKill;
                 }
                 continue; // an attack-capable tile never competes with approach/retreat
             }
@@ -1267,7 +1303,7 @@ void aiActUnit(int idx)
     }
     u.hasMoved = true;
 
-    int postMoveTarget = findAttackTarget(u.type, u.color, u.tileX, u.tileY);
+    int postMoveTarget = findAttackTarget(u.type, u.health, u.color, u.tileX, u.tileY);
     if (postMoveTarget >= 0)
         attackUnit(idx, postMoveTarget);
 }
