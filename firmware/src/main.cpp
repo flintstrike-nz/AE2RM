@@ -1,24 +1,30 @@
-// AE2RM ESP32 port -- milestone 7: single-player vs. a basic AI.
+// AE2RM ESP32 port -- milestone 10: single-player vs. a basic AI, plus
+// m0's mission-script intro cutscene.
 //
-// Boots to a mission menu (m0.aem-m7.aem, generic "Mission N" labels --
-// the original's mission titles come from a localized string table this
-// firmware doesn't read). Tap one to play: you are always blue, the
-// computer is always red. Tap a unit belonging to the current turn's
-// side to select it -- its movement range highlights cyan
-// (terrain-cost-limited flood fill) and any enemy already in its attack
-// range highlights red. Tap a cyan tile to move there (capturing a
-// village/castle you move onto, if this unit type can), tap a
-// red-highlighted enemy to attack it (one action per unit per turn --
+// Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
+// when /strings.dat loaded -- see loadStrings() -- else a generic
+// "Mission N" label). Tap one to play: you are always blue, the computer
+// is always red. m0 additionally runs its mission-script's intro cutscene
+// once at mission start (see runIntroScript()) before handing control to
+// you -- real dialog text, a couple of scripted unit moves/removals, and
+// camera pans; the other 7 maps start playable immediately. Tap a unit
+// belonging to the current turn's side to select it -- its movement range
+// highlights cyan (terrain-cost-limited flood fill) and any enemy already
+// in its attack range highlights red. Tap a cyan tile to move there
+// (capturing a village/castle you move onto, if this unit type can), tap
+// a red-highlighted enemy to attack it (one action per unit per turn --
 // this is "move OR attack", not the original's "move then attack"), tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
-// (attack in range, else move-and-attack, else close the distance -- see
+// (attack the weakest in-range enemy, else move-and-attack, else retreat
+// if critically low on health, else close the distance -- see
 // aiActUnit()'s comment; not a port of the original's scoring-heuristic
-// AI) and hands back control. A side loses when its king dies -- a
-// simplification of the original's castle-capture-tied defeat condition,
-// see README -- and tapping the win banner, or the always-available MENU
-// button, returns to the mission menu. Drag still pans the camera during
-// a mission. See firmware/README.md for what's implemented and what's
-// next.
+// AI) and hands back control. Tap any other living unit (an enemy, or
+// one that's already moved) to see its stats instead. A side loses when
+// its king dies -- a simplification of the original's
+// castle-capture-tied defeat condition, see README -- and tapping the
+// win banner, or the always-available MENU button, returns to the
+// mission menu. Drag still pans the camera during a mission. See
+// firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -206,6 +212,18 @@ static int selectedUnit = -1; // index into units[], or -1 if none selected
 // act with. Cleared by tapping empty ground, the MENU/END TURN buttons,
 // or selecting a movable unit.
 static int infoUnit = -1;
+
+// The original's localized string table (PaintableObject.getLocaleString()),
+// copied as-is to /strings.dat by convert_assets.py. Loaded once (see
+// loadStrings()) into a single PSRAM buffer of NUL-terminated strings, with
+// scriptStringOffsets[i] giving string i's byte offset into it -- used for
+// the mission menu's real titles (indices 121-128) and m0's mission-script
+// dialog text. A missing/failed-to-load table degrades gracefully: the menu
+// falls back to generic "Mission N" labels and the m0 intro cutscene is
+// skipped entirely (see runIntroScript()) rather than showing blank dialogs.
+static char *scriptStrings = nullptr;
+static uint32_t *scriptStringOffsets = nullptr;
+static int scriptStringCount = 0;
 
 // 0 or 1, matching UnitPlacement::color directly (see the comment on that
 // struct). Color 1 is always AI-controlled (see AI_COLOR below) -- there
@@ -595,6 +613,113 @@ void computeReachable(const UnitPlacement &u)
 }
 
 void drawViewport();
+void clampView(); // defined below, with the touch-drag handling it's shared with
+
+// Loads /strings.dat (see convert_assets.py) into scriptStrings/
+// scriptStringOffsets. Safe to call more than once -- a no-op if already
+// loaded. Mission titles start at locale string index 121 (one per
+// m0.aem..m7.aem, in order -- MainDisplayable.java's
+// `getLocaleString(121 + mission)`), so this runs once at boot rather than
+// only when m0's script needs it.
+bool loadStrings()
+{
+    if (scriptStrings)
+        return true;
+
+    File f = SD_MMC.open("/strings.dat", FILE_READ);
+    if (!f)
+    {
+        Serial.println("strings.dat not found -- mission titles/dialog text unavailable");
+        return false;
+    }
+
+    uint8_t hdr[4];
+    if (f.read(hdr, 4) != 4)
+    {
+        Serial.println("strings.dat: truncated header");
+        f.close();
+        return false;
+    }
+    uint32_t count = (uint32_t(hdr[0]) << 24) | (uint32_t(hdr[1]) << 16) | (uint32_t(hdr[2]) << 8) | hdr[3];
+
+    // The header count comes straight off the SD card -- untrusted. Every
+    // record costs at least 2 bytes (a zero-length string's length
+    // prefix), so a count that couldn't possibly fit in the file's
+    // remaining bytes is corrupt; reject it before it's used to size the
+    // offsets allocation (count+1 on a bogus multi-billion count would
+    // overflow size_t on this 32-bit target and under-allocate, then the
+    // read loop below would walk off the end of that buffer).
+    size_t remaining = f.size() - 4;
+    if (count > remaining / 2)
+    {
+        Serial.printf("strings.dat: implausible string count %u for a %u-byte file\n",
+                       (unsigned)count, (unsigned)f.size());
+        f.close();
+        return false;
+    }
+
+    // Concatenated-with-NUL-terminators bytes can't exceed the file's
+    // remaining size (each string costs len+1 bytes in the buffer vs.
+    // len+2 in the file, i.e. one *less* byte per string) -- f.size() is a
+    // safe, simple upper bound for the buffer, not a tight one.
+    size_t bufCap = f.size();
+    char *buf = static_cast<char *>(ps_malloc(bufCap));
+    uint32_t *offsets = static_cast<uint32_t *>(malloc(sizeof(uint32_t) * (count + 1)));
+    if (!buf || !offsets)
+    {
+        Serial.println("strings.dat: allocation failed");
+        free(buf);
+        free(offsets);
+        f.close();
+        return false;
+    }
+
+    size_t pos = 0;
+    uint32_t i = 0;
+    for (; i < count; ++i)
+    {
+        uint8_t lenBytes[2];
+        if (f.read(lenBytes, 2) != 2)
+            break;
+        uint16_t len = (uint16_t(lenBytes[0]) << 8) | lenBytes[1];
+        offsets[i] = (uint32_t)pos;
+        if (len > 0 && f.read(reinterpret_cast<uint8_t *>(buf + pos), len) != len)
+            break;
+        pos += len;
+        buf[pos++] = '\0';
+    }
+    f.close();
+
+    if (i < count)
+    {
+        // A partial table would make getScriptString() return "" for any
+        // index past the truncation point -- ShowDialog would render an
+        // empty box instead of the "cutscene skipped" fallback this
+        // function's callers actually expect on a load failure. Reject
+        // the whole table rather than serving a silently incomplete one.
+        Serial.printf("strings.dat: truncated after %u/%u strings, rejecting table\n", (unsigned)i, (unsigned)count);
+        free(buf);
+        free(offsets);
+        return false;
+    }
+    offsets[count] = (uint32_t)pos; // one-past-the-last string's end
+
+    scriptStrings = buf;
+    scriptStringOffsets = offsets;
+    scriptStringCount = (int)count;
+    Serial.printf("loaded %d locale strings (%u bytes)\n", scriptStringCount, (unsigned)pos);
+    return true;
+}
+
+// "" for an out-of-range index or an unloaded table, never nullptr --
+// callers (mission menu labels, dialog rendering) can gfx.print() the
+// result unconditionally.
+const char *getScriptString(int id)
+{
+    if (!scriptStrings || id < 0 || id >= scriptStringCount)
+        return "";
+    return scriptStrings + scriptStringOffsets[id];
+}
 
 constexpr int MENU_ROW_H = 28;
 constexpr int MENU_ROW_TOP = 50;
@@ -609,11 +734,14 @@ void drawMenu()
     gfx.print("AE2RM");
     gfx.setTextSize(1);
     gfx.setCursor(20, 30);
-    // Mission titles aren't ported (they come from a localized string
-    // table this firmware doesn't read -- PaintableObject.getLocaleString()
-    // in the original), so these are just generic slots for m0.aem..m7.aem.
     gfx.print("select a mission");
 
+    // Locale string 121+i is mission i's real title (see loadStrings()'s
+    // comment); loadStrings() is called once from setup(), so this is
+    // just a lookup, not a fresh SD read per row. A missing/failed-to-load
+    // strings.dat falls back to a generic "Mission N" label instead of an
+    // empty row.
+    constexpr int MISSION_TITLE_STRING_BASE = 121;
     for (int i = 0; i < STORY_MAP_COUNT; ++i)
     {
         int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
@@ -622,9 +750,271 @@ void drawMenu()
         gfx.setTextSize(2);
         gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
         gfx.setCursor(30, rowY + 6);
-        gfx.printf("Mission %d", i + 1);
+        const char *title = getScriptString(MISSION_TITLE_STRING_BASE + i);
+        if (title[0])
+            gfx.print(title);
+        else
+            gfx.printf("Mission %d", i + 1);
     }
     gfx.endWrite();
+}
+
+// Reads one '\n'-terminated line from f into buf (stripping a trailing
+// '\r' and the newline itself), NUL-terminated. Returns false only at EOF
+// with nothing left to read -- a line longer than bufSize is silently
+// truncated (every m0.script line is well under 96 bytes).
+bool readScriptLine(File &f, char *buf, size_t bufSize)
+{
+    if (!f.available())
+        return false;
+    size_t n = 0;
+    while (f.available() && n + 1 < bufSize)
+    {
+        int c = f.read();
+        if (c < 0 || c == '\n')
+            break;
+        if (c != '\r')
+            buf[n++] = (char)c;
+    }
+    buf[n] = '\0';
+    return true;
+}
+
+// Renders a bottom dialog box with word-wrapped `text` and blocks until the
+// player taps (and releases) the screen. Called synchronously from
+// runIntroScript(), which runs before startGame() hands control back to
+// loop() -- this is the only way to pace the cutscene on input without a
+// per-frame script state machine (out of scope for this milestone; see
+// runIntroScript()'s comment).
+void showScriptDialog(const char *text)
+{
+    constexpr int BOX_H = 70;
+    constexpr int BOX_Y = DISPLAY_HEIGHT - BOX_H;
+    constexpr int PAD = 6;
+    constexpr int CHAR_W = 6; // gfx default font at setTextSize(1)
+    constexpr int LINE_H = 10;
+    const int maxChars = (DISPLAY_WIDTH - 2 * PAD) / CHAR_W;
+
+    gfx.startWrite();
+    gfx.fillRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_BLACK);
+    gfx.drawRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_WHITE);
+    gfx.setTextSize(1);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+
+    // Greedy word-wrap, good enough for these short dialog lines -- not
+    // general typesetting. A single word longer than maxChars (doesn't
+    // happen in this game's English dialog) would just get hard-split.
+    int row = 0;
+    const char *p = text;
+    char lineBuf[64];
+    constexpr int MAX_ROWS = (BOX_H - PAD - LINE_H - 4) / LINE_H; // leaves room for the prompt line
+    while (*p && row < MAX_ROWS)
+    {
+        int lineLen = 0;
+        const char *lastSpace = nullptr;
+        const char *scan = p;
+        int cap = maxChars < (int)sizeof(lineBuf) - 1 ? maxChars : (int)sizeof(lineBuf) - 1;
+        while (*scan && *scan != '\n' && lineLen < cap)
+        {
+            if (*scan == ' ')
+                lastSpace = scan;
+            lineBuf[lineLen++] = *scan;
+            ++scan;
+        }
+        if (*scan && *scan != '\n' && lastSpace)
+        {
+            lineLen = (int)(lastSpace - p);
+            scan = lastSpace + 1;
+        }
+        lineBuf[lineLen] = '\0';
+        gfx.setCursor(PAD, BOX_Y + PAD + row * LINE_H);
+        gfx.print(lineBuf);
+        ++row;
+        p = (*scan == '\n') ? scan + 1 : scan;
+        while (*p == ' ')
+            ++p;
+    }
+
+    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+    gfx.setCursor(PAD, BOX_Y + BOX_H - LINE_H - 2);
+    gfx.print("[tap to continue]");
+    gfx.endWrite();
+
+    // ArduinoOTA.handle() is normally only serviced from loop() -- this
+    // blocking wait has to call it itself, or leaving a dialog open would
+    // make the board unreachable over OTA for as long as the player
+    // doesn't tap. Bailing out on otaInProgress (rather than continuing to
+    // poll touch/redraw) matches loop()'s own rule of leaving the
+    // display/SD alone once a flash write has actually started.
+    bool wasDown = false;
+    for (;;)
+    {
+        ArduinoOTA.handle();
+        if (otaInProgress)
+            break;
+        int32_t x, y;
+        bool down = gfx.getTouch(&x, &y);
+        if (!down && wasDown)
+            break;
+        wasDown = down;
+        delay(16);
+    }
+}
+
+// Interprets a hand-picked subset of m0.script -- the intro cutscene,
+// @Case 0 through @Case 13 (ending at "StartPlay") -- and stops there.
+// @Case 14 onward drives the rest of the mission's tutorial hints
+// (Test-conditioned ShowHelp overlays checked against live game state:
+// CurrentTurn, UnitFinishedMove, CountUnits, etc.) and the ending dialog
+// (Test-gated on CountUnits/GameState, ending in CompleteMission) -- both
+// need a real per-frame condition-evaluating state machine hooked into
+// ongoing play, not the one-shot linear pass this function does. That's a
+// materially bigger feature, left for a future milestone; only m0's story
+// intro ships here.
+//
+// Runs synchronously (blocking) right after startGame() first draws the
+// map -- not the original's real-time script VM, which runs the *whole*
+// mission this way, this port doesn't attempt. Commands with no equivalent
+// in this port (no fade/cursor-sprite/particle system, no per-tile
+// movement animation to pace) are silently skipped, not simulated:
+// ShowMapName, NextState, SetFadeEnabled, SetFadeValue, SetCursorVisible,
+// SetMapStepMax, SetUnitSpeed, Vibrate, ScheduleUnitAnimationStop,
+// CreateSpriteAtUnit, StartPlay.
+void runIntroScript()
+{
+    // 224 is the highest ShowDialog string index this case range uses
+    // (see @Case 5-12 below) -- a structurally valid but short/empty
+    // table (e.g. a 4-byte strings.dat with count == 0) would otherwise
+    // pass loadStrings() and still leave getScriptString() returning ""
+    // for these IDs, running the cutscene's unit moves/removal but
+    // showing blank dialog boxes instead of the documented skip.
+    constexpr int LAST_INTRO_DIALOG_STRING = 224;
+    if (!loadStrings() || scriptStringCount <= LAST_INTRO_DIALOG_STRING)
+        return; // dialog text unavailable/incomplete -- skip the cutscene, not show blank boxes
+
+    File f = SD_MMC.open("/scripts/m0.script", FILE_READ);
+    if (!f)
+    {
+        Serial.println("m0.script not found, skipping intro cutscene");
+        return;
+    }
+
+    int scriptUnit = -1; // last unit named by GetUnit, for a following RemoveUnit
+    char line[96];
+    while (readScriptLine(f, line, sizeof(line)))
+    {
+        // showScriptDialog() already bails out of its own wait on
+        // otaInProgress; check again here so a Wait/camera-pan/etc.
+        // between dialogs doesn't keep touching the display/SD once a
+        // flash write has actually started.
+        if (otaInProgress)
+            break;
+        if (line[0] == '\0')
+            continue;
+        if (!strncmp(line, "@Case", 5))
+        {
+            // "@Case 14" is where the Test-driven tutorial/epilogue this
+            // milestone doesn't port begins -- see the comment above.
+            if (!strcmp(line, "@Case 14"))
+                break;
+            continue;
+        }
+
+        char *saveptr = nullptr;
+        char *tok[8] = {};
+        int n = 0;
+        for (char *t = strtok_r(line, " ", &saveptr); t && n < 8; t = strtok_r(nullptr, " ", &saveptr))
+            tok[n++] = t;
+        if (n == 0)
+            continue;
+
+        if (!strcmp(tok[0], "GetUnitPlotRoute") && n >= 6)
+        {
+            // Args are (sx, sy, color, ex, ey, animate) -- matches
+            // getUnit(x, y, color).plotRoute(ex, ey, animate) in the
+            // original, NOT (color, sx, sy, ex, ey); getting this order
+            // wrong makes every lookup below miss (verified against
+            // m0.aem's actual starting positions while implementing this).
+            // The original animates the route (the trailing bool selects
+            // animated vs. instant); this port always teleports.
+            int sx = atoi(tok[1]), sy = atoi(tok[2]);
+            int color = atoi(tok[3]);
+            int ex = atoi(tok[4]), ey = atoi(tok[5]);
+            int idx = unitIndexAt(sx, sy);
+            if (idx >= 0 && units[idx].color == color)
+            {
+                units[idx].tileX = (int16_t)ex;
+                units[idx].tileY = (int16_t)ey;
+            }
+        }
+        else if (!strcmp(tok[0], "MoveMapAndCursor") && n >= 2)
+        {
+            int tx, ty;
+            if (!strcmp(tok[1], "king") && n >= 3)
+            {
+                int color = atoi(tok[2]);
+                int kingIdx = -1;
+                for (int i = 0; i < unitCount; ++i)
+                {
+                    if (units[i].alive && units[i].type == UNIT_TYPE_KING && units[i].color == color)
+                    {
+                        kingIdx = i;
+                        break;
+                    }
+                }
+                if (kingIdx < 0)
+                    continue;
+                tx = units[kingIdx].tileX;
+                ty = units[kingIdx].tileY;
+            }
+            else if (n >= 3)
+            {
+                tx = atoi(tok[1]);
+                ty = atoi(tok[2]);
+            }
+            else
+            {
+                continue;
+            }
+            // Center the viewport on the target tile -- a jump cut, not
+            // the original's smooth pan (no per-frame animation loop to
+            // pace it against here).
+            viewX = tx * TILE_SIZE - DISPLAY_WIDTH / 2;
+            viewY = ty * TILE_SIZE - DISPLAY_HEIGHT / 2;
+            clampView();
+            drawViewport();
+        }
+        else if (!strcmp(tok[0], "GetUnit") && n >= 3)
+        {
+            scriptUnit = unitIndexAt(atoi(tok[1]), atoi(tok[2]));
+        }
+        else if (!strcmp(tok[0], "RemoveUnit"))
+        {
+            if (scriptUnit >= 0)
+                units[scriptUnit].alive = false;
+        }
+        else if (!strcmp(tok[0], "ShowDialog") && n >= 2)
+        {
+            drawViewport(); // make sure what's on screen is current before covering part of it
+            showScriptDialog(getScriptString(atoi(tok[1])));
+        }
+        else if (!strcmp(tok[0], "Wait") && n >= 2)
+        {
+            // The original paces this against its own tick rate; there's
+            // no equivalent tick here, so this is a plain approximate
+            // delay, not a faithful conversion of "N ticks".
+            constexpr unsigned long MS_PER_WAIT_TICK = 80;
+            delay((unsigned long)atoi(tok[1]) * MS_PER_WAIT_TICK);
+        }
+        // Every other command in this case range (ShowMapName, NextState,
+        // SetFadeEnabled, SetFadeValue, SetCursorVisible, SetMapStepMax,
+        // SetUnitSpeed, Vibrate, ScheduleUnitAnimationStop,
+        // CreateSpriteAtUnit, StartPlay) has no equivalent here -- see this
+        // function's doc comment -- and is silently skipped.
+    }
+    f.close();
+    if (!otaInProgress)
+        drawViewport();
 }
 
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to
@@ -661,6 +1051,9 @@ void startGame(int mapIndex)
     appState = STATE_PLAYING;
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
+
+    if (mapIndex == 0)
+        runIntroScript(); // only m0 has a mission-script file -- see its comment
 }
 
 void handleMenuTap(int screenX, int screenY)
@@ -1355,6 +1748,8 @@ void setup()
     }
 
     setupOTA(); // best-effort; game runs offline if this doesn't connect
+
+    loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
 
     drawMenu();
 }
