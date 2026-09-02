@@ -1047,6 +1047,12 @@ void startGame(int mapIndex)
         gfx.setCursor(10, 40);
         gfx.print("map load failed!");
         delay(2000);
+        // Must set appState here, not just draw the menu -- RETRY (added
+        // this milestone) calls startGame() from STATE_PLAYING, and a
+        // failure that left appState untouched would keep loop() routing
+        // touches to handleTap() (the gameplay handler) against a screen
+        // that's showing the menu, swallowing the first mission tap.
+        appState = STATE_MENU;
         drawMenu();
         return;
     }
