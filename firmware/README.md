@@ -1,14 +1,14 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 10**:
+not an automatic conversion — there's no JVM here. This is **milestone 11**:
 terrain, units, movement, combat, capture, and the mission menu
-(milestones 1-6), an AI opponent (milestones 7-8) — you're always blue, the
-computer is always red, so this is playable single-player — a tap-to-inspect
-unit stat panel (milestone 9), and now `m0`'s intro cutscene, the first
-piece of the original's scripted mission events to be ported (milestone 10;
-see "Mission-script interpreter" below for exactly how much of the format
-that covers).
+(milestones 1-6), an AI opponent (milestones 7-8, 11) — you're always blue,
+the computer is always red, so this is playable single-player — a
+tap-to-inspect unit stat panel (milestone 9), and `m0`'s intro cutscene, the
+first piece of the original's scripted mission events to be ported
+(milestone 10; see "Mission-script interpreter" below for exactly how much
+of the format that covers).
 
 ## Target hardware
 
@@ -94,7 +94,11 @@ not yet confirmed on-device.
   selection around -- highlighting which of many reachable tiles also
   opens an attack -- is more UI than this milestone scoped; every
   reachable attack-capable tile is scored, not just the first one found
-  in scan order, and the tile giving the lowest-health target wins);
+  in scan order, and the tile giving the lowest-health target wins; among
+  tiles tying on that, the one with the best terrain defence bonus for
+  *this* unit wins -- a free tiebreak using the same `TERRAIN_DEFENCE_BONUS`
+  lookup `resolveHit()` already applies to a defender, not a real
+  lookahead at whether a counterattack will actually land there);
   else, if this unit's own health is at or below 25, retreats -- moves
   to whichever reachable tile *maximizes* its distance to the *closest*
   living enemy (scored against every enemy on the board, not just
@@ -108,9 +112,10 @@ not yet confirmed on-device.
   finishing off a damaged unit is a permanent gain, splitting damage
   across several full-health enemies isn't. No pathfinding beyond
   `computeReachable()`'s flood fill, no defensive positioning beyond
-  that one retreat rule, no value-based target prioritization (weakest
-  by *health*, not by unit type or tactical importance), and no
-  coordination between units. This is **not** a port of the original's
+  the retreat rule and the attack-tile terrain tiebreak, no value-based
+  target prioritization (weakest by *health*, not by unit type or
+  tactical importance), and no coordination between units. This is
+  **not** a port of the original's
   AI, which is a large scoring heuristic spanning much of
   `MainDisplayable.java` (`sub_10cb()` and friends) -- it's enough to
   make single-player winnable and losable, nothing more.

@@ -43,7 +43,8 @@ the full pinout and hardware details.
   rules exactly
 - **An AI opponent**: you play blue, the computer plays red — this makes
   the game genuinely single-player. It targets the weakest in-range
-  enemy and retreats when critically low on health, but it's still a
+  enemy (preferring a better-defended tile to attack from when that
+  ties), and retreats when critically low on health, but it's still a
   simple heuristic, not a port of the original's scoring-based AI
 - **A unit stat panel**: tap any unit you can't currently act with — an
   enemy, or one that's already moved — to see its type, HP, attack,
@@ -100,6 +101,9 @@ history.
    tap any unit you can't act with to see its stats
 10. [Mission-script interpreter, part 1](https://github.com/hayden-flintoft/AE2RM/pull/10)
     — real mission titles, `m0`'s intro cutscene with actual dialog text
+11. [AI terrain awareness](https://github.com/hayden-flintoft/AE2RM/pull/11)
+    — when multiple attack tiles tie on target weakness, prefers the
+    one with the best terrain defence bonus
 
 **Planned, not yet started (no fixed order):**
 
