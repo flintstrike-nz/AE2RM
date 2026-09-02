@@ -42,10 +42,11 @@ the full pinout and hardware details.
   type moves onto them, matching the original's capture-eligibility
   rules exactly
 - **An AI opponent**: you play blue, the computer plays red — this makes
-  the game genuinely single-player. It targets the weakest in-range
-  enemy (preferring a better-defended tile to attack from when that
-  ties), and retreats when critically low on health, but it's still a
-  simple heuristic, not a port of the original's scoring-based AI
+  the game genuinely single-player. It secures a guaranteed kill when
+  one's available, otherwise targets the weakest in-range enemy
+  (preferring a better-defended tile to attack from when that ties), and
+  retreats when critically low on health, but it's still a simple
+  heuristic, not a port of the original's scoring-based AI
 - **A unit stat panel**: tap any unit you can't currently act with — an
   enemy, or one that's already moved — to see its type, HP, attack,
   defence, range, and movement
@@ -109,6 +110,9 @@ history.
 12. [Living-unit-count HUD](https://github.com/hayden-flintoft/AE2RM/pull/12)
     — how many of each side's units are still alive, next to the turn
     indicator
+13. [AI secures guaranteed kills](https://github.com/hayden-flintoft/AE2RM/pull/13)
+    — attacks a target it can finish off regardless of the damage roll
+    before falling back to the weakest-target rule
 
 **Planned, not yet started (no fixed order):**
 
