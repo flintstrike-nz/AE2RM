@@ -36,8 +36,9 @@ not yet confirmed on-device.
 - Starting units drawn as static 24x24 map icons (`unit_icons.png`, one
   of 12 types x 4 team colors) at their map-file position, with
   transparent-pixel blitting so they don't cover terrain with a square
-  background. **Team-color assignment is exact for story maps** (`m0`-`m7`,
-  the only ones converted so far): `MainDisplayable.java`'s `loadMap()`
+  background. **Team-color assignment is exact for story maps** (`m0`-`m7`
+  -- only `m0` is actually converted/loaded by this firmware today, but the
+  mapping holds for the whole set): `MainDisplayable.java`'s `loadMap()`
   always hardcodes the same 2-side turn queue for these (raw color 0 =
   blue, 1 = red), so using each unit record's raw color slot directly is
   correct here — it would NOT be for skirmish maps (`s0`-`s11`, not

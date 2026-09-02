@@ -116,10 +116,11 @@ static const uint8_t TILE_TERRAIN_TYPE[TILE_COUNT] = {
 // "MoveRange" line in its .unit file).
 static const uint8_t UNIT_MOVE_RANGE[UNIT_TYPE_COUNT] = {5, 5, 5, 5, 5, 6, 5, 4, 7, 5, 5, 4};
 
-// Movement points remaining when this unit could reach [x*mapHeight+y] on
-// the currently selected unit's turn, or -1 if unreachable. Sized/allocated
-// alongside mapTiles in loadMap(); recomputed by computeReachable() each
-// time a unit is selected.
+// Movement points remaining when the currently selected unit could reach
+// [x*mapHeight+y], or -1 if unreachable. Lazily allocated/resized to match
+// the current map's dimensions inside computeReachable() (not in loadMap()
+// -- there's no selected unit yet when a map loads), and recomputed there
+// each time a unit is selected.
 static int8_t *reachableCost = nullptr;
 static int selectedUnit = -1; // index into units[], or -1 if none selected
 
@@ -392,7 +393,10 @@ void computeReachable(const UnitPlacement &u)
                     int occupant = unitIndexAt(nx, ny);
                     if (occupant >= 0 && !(nx == u.tileX && ny == u.tileY))
                         continue;
-                    int cost = TERRAIN_MOVE_COST[TILE_TERRAIN_TYPE[tileAt(nx, ny)]];
+                    uint8_t tile = tileAt(nx, ny);
+                    if (tile >= TILE_COUNT)
+                        continue; // treat a corrupt/out-of-range tile index as impassable
+                    int cost = TERRAIN_MOVE_COST[TILE_TERRAIN_TYPE[tile]];
                     int remain = budget - cost;
                     if (remain < 0)
                         continue;
