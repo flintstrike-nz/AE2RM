@@ -1109,14 +1109,18 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //      the first found, and the one whose target has the lowest health
 //      wins -- so this path shares findAttackTarget()'s weakest-first rule
 //      instead of taking whatever attack the scan order turns up first.
+//      Among tiles tying on target health, the one with the best terrain
+//      defence bonus for THIS unit wins -- a free tiebreak, not a real
+//      lookahead at whether a counterattack will actually land.
 //   3. Otherwise, if this unit's health is critically low (<=25), move to
 //      whichever reachable tile MAXIMIZES its distance to the CLOSEST
 //      living enemy (checked against every enemy, not just the one
 //      nearest before moving -- with enemies on multiple sides, only that
 //      minimum says how exposed a tile actually leaves the unit) --
-//      crude self-preservation, not real defensive positioning (no
-//      cover/terrain-bonus awareness, no regard for whether retreating
-//      abandons an objective).
+//      crude self-preservation, not real defensive positioning (terrain
+//      only factors into step 2's tiebreak above, not into retreat tile
+//      choice, and there's no regard for whether retreating abandons an
+//      objective).
 //   4. Otherwise, move toward the nearest living enemy (by post-move
 //      distance) among reachable tiles, to close the gap for a future
 //      turn.
@@ -1174,7 +1178,7 @@ void aiActUnit(int idx)
     int moveToX = -1, moveToY = -1;
     int bestApproachDist = nearestDist;  // used only when !retreating
     int bestRetreatMinDist = -1;         // used only when retreating
-    int attackTileX = -1, attackTileY = -1, attackTargetHealth = INT32_MAX;
+    int attackTileX = -1, attackTileY = -1, attackTargetHealth = INT32_MAX, attackTileDefBonus = INT32_MIN;
     for (int x = 0; x < mapWidth; ++x)
     {
         for (int y = 0; y < mapHeight; ++y)
@@ -1187,11 +1191,26 @@ void aiActUnit(int idx)
             int tileTarget = findAttackTarget(u.type, u.color, x, y);
             if (tileTarget >= 0)
             {
-                if (attackTileX < 0 || units[tileTarget].health < attackTargetHealth)
+                // Weakest target wins as before; among tiles tying on that,
+                // prefer the one with the best terrain defence bonus for
+                // THIS unit -- it's the tile a counterattack (if the target
+                // survives and is close-range-eligible) would land on, per
+                // resolveHit()'s own terrain lookup on the defender's tile.
+                // Not a full lookahead (doesn't know if a counter will
+                // actually happen, or weigh this against reaching a weaker
+                // target elsewhere), just a free tiebreak among otherwise
+                // equal attack options.
+                uint8_t tile = tileAt(x, y);
+                int defBonus = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
+                bool better = attackTileX < 0 ||
+                              units[tileTarget].health < attackTargetHealth ||
+                              (units[tileTarget].health == attackTargetHealth && defBonus > attackTileDefBonus);
+                if (better)
                 {
                     attackTileX = x;
                     attackTileY = y;
                     attackTargetHealth = units[tileTarget].health;
+                    attackTileDefBonus = defBonus;
                 }
                 continue; // an attack-capable tile never competes with approach/retreat
             }
