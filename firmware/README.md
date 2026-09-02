@@ -226,11 +226,9 @@ to watch, only the final board state, and whether that final state looks
 like a coherent turn (not e.g. every unit just sitting still) is
 unverified. So is the zero-reachable-tiles edge case (handled by falling
 through to `hasMoved = true` without a move). The SD/MMC init, tile/unit
-rendering,
-tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp` is a
-guess), menu tap hit-testing, and OTA path are the other things most
-likely to need a
-follow-up fix once you can see real output.
+rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp`
+is a guess), menu tap hit-testing, and OTA path are the other things
+most likely to need a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 

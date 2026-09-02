@@ -55,6 +55,43 @@ original's music format needs its own synthesizer — there's no audio
 subsystem yet). See [`firmware/README.md`](firmware/README.md) for the
 full list and the reasoning behind each scoping decision.
 
+### Roadmap
+
+Each milestone below was scoped, built, and reviewed as its own pull
+request — see each one for the full implementation detail and review
+history.
+
+**Done:**
+
+1. [Terrain rendering](https://github.com/hayden-flintoft/AE2RM/pull/1) —
+   asset pipeline, `.aem` map loading, touch-pannable tile viewport
+2. [Starting units](https://github.com/hayden-flintoft/AE2RM/pull/2) —
+   unit icons rendered at their map-file positions
+3. [Movement](https://github.com/hayden-flintoft/AE2RM/pull/3) —
+   tap-to-select, terrain-cost movement range, tap-to-move, turn passing
+4. [Combat](https://github.com/hayden-flintoft/AE2RM/pull/4) — attack
+   range, damage, counterattacks, unit death
+5. [Capture & win condition](https://github.com/hayden-flintoft/AE2RM/pull/5)
+   — village/castle capture, a side loses when its king dies
+6. [Mission menu](https://github.com/hayden-flintoft/AE2RM/pull/6) — all
+   8 story maps selectable, an unconditional way back to the menu
+7. [Basic AI opponent](https://github.com/hayden-flintoft/AE2RM/pull/7)
+   — single-player vs. a simple heuristic AI
+
+**Planned, not yet started (no fixed order):**
+
+- Get milestone 7 actually running on the physical board and fix
+  whatever real hardware reveals — pins, touch feel, timing, AI behavior
+  you can actually watch
+- Scripted mission events (the `m*.script` files the two thinner
+  missions, `m4`/`m6`, are missing)
+- MIDI music via a small on-device synthesizer
+- A stronger AI (target prioritization, defensive positioning, closer
+  to the original's scoring heuristic)
+- In-game menus/HUD beyond mission select (settings, unit info, etc.)
+- Skirmish maps (`s0`-`s11`), which need a real building-derived,
+  4-side turn queue instead of the hardcoded 2-side one story maps use
+
 ### Verification status
 
 **This firmware has not yet been flashed to or run on physical
