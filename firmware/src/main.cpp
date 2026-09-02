@@ -1,13 +1,15 @@
-// AE2RM ESP32 port -- milestone 4: local hotseat movement + combat, no AI.
+// AE2RM ESP32 port -- milestone 5: + building capture, king-death win.
 //
 // Tap a unit belonging to the current turn's side to select it: its
 // movement range highlights cyan (terrain-cost-limited flood fill) and any
 // enemy already in its attack range highlights red. Tap a cyan tile to
-// move there, tap a red-highlighted enemy to attack it (one action per
-// unit per turn -- this is "move OR attack", not the original's "move
-// then attack"), tap "END TURN" to pass to the other side. Still no AI
-// (two-human hotseat only -- see README for why), no buildings/capture,
-// no menus, and only map m0. Drag still pans the camera.
+// move there (capturing a village/castle you move onto, if this unit type
+// can), tap a red-highlighted enemy to attack it (one action per unit per
+// turn -- this is "move OR attack", not the original's "move then
+// attack"), tap "END TURN" to pass to the other side. A side loses when
+// its king dies -- a simplification of the original's castle-capture-tied
+// defeat condition, see README. Still no AI (two-human hotseat only --
+// see README for why), no menus, and only map m0. Drag still pans camera.
 // See firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
@@ -120,6 +122,7 @@ static const uint8_t TILE_TERRAIN_TYPE[TILE_COUNT] = {
 // Unit.UNIT_NAMES order: soldier, archer, lizard, wizard, wisp, spider,
 // golem, catapult, wyvern, king, skeleton, crystall (from each unit's
 // "MoveRange" line in its .unit file).
+constexpr uint8_t UNIT_TYPE_KING = 9;
 static const uint8_t UNIT_MOVE_RANGE[UNIT_TYPE_COUNT] = {5, 5, 5, 5, 5, 6, 5, 4, 7, 5, 5, 4};
 
 // Combat stats, from each unit's "Attack min max" / "Defence" /
@@ -132,6 +135,47 @@ static const uint8_t UNIT_OFFENCE_MAX[UNIT_TYPE_COUNT] = {55, 55, 55, 45, 40, 65
 static const uint8_t UNIT_DEFENCE[UNIT_TYPE_COUNT] = {5, 5, 10, 5, 10, 15, 30, 10, 25, 20, 2, 15};
 static const uint8_t UNIT_ATTACK_RANGE_MAX[UNIT_TYPE_COUNT] = {1, 2, 1, 1, 1, 1, 1, 4, 1, 1, 1, 0};
 static const uint8_t UNIT_ATTACK_RANGE_MIN[UNIT_TYPE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0};
+
+// Bit flags from each unit's "HasProperty N" lines (UNIT_PROPERTIES[i] =
+// OR of 1<<N for each line). Only the two capture-related bits are used by
+// this milestone: bit 3 (0x08, "can capture a village") is soldier and
+// king; bit 4 (0x10, "can capture a castle") is king only -- no other unit
+// in this tileset can take a castle. The other bits (mounted/flying
+// matchup bonuses, water bonuses, etc.) exist in the source data but
+// aren't read here since milestone 4 didn't port the combat bonuses that
+// use them.
+constexpr uint8_t UNIT_PROPERTY_CAPTURE_VILLAGE = 0x08;
+constexpr uint8_t UNIT_PROPERTY_CAPTURE_CASTLE = 0x10;
+static const uint16_t UNIT_PROPERTIES[UNIT_TYPE_COUNT] = {
+    0x08, 0x40, 0x02, 0x20, 0x100, 0x80, 0x00, 0x200, 0x01, 0x1C, 0x00, 0x00,
+};
+
+// Fraction-building tiles (villages and castles) per MainDisplayable.java:
+// FRACTION_BUILDINGS=37 is the first of 10 consecutive tile indices
+// (37-46), 5 owner slots (0=neutral, 1-4=team) x 2 sub-types interleaved
+// -- even offset from 37 is a village (terrain type 8), odd is a castle
+// (terrain type 9). getBuildingFraction()/setBuildingFraction() convert
+// between a tile index and its owning fraction with this exact formula.
+constexpr uint8_t FRACTION_BUILDINGS = 37;
+constexpr uint8_t CUSTOM_TILES = FRACTION_BUILDINGS + 10; // 47, exclusive upper bound
+
+inline bool isFractionBuilding(uint8_t tile)
+{
+    return tile >= FRACTION_BUILDINGS && tile < CUSTOM_TILES;
+}
+
+inline int buildingFraction(uint8_t tile)
+{
+    return (tile - FRACTION_BUILDINGS) / 2; // 0-4
+}
+
+inline uint8_t setBuildingFraction(uint8_t tile, int fraction)
+{
+    return FRACTION_BUILDINGS + fraction * 2 + (tile - FRACTION_BUILDINGS) % 2;
+}
+
+static bool gameOver = false;
+static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
 
 // Movement points remaining when the currently selected unit could reach
 // [x*mapHeight+y], or -1 if unreachable. Lazily allocated/resized to match
@@ -411,7 +455,20 @@ void resolveHit(int attackerIdx, int victimIdx)
                   attackerIdx, attacker.type, victimIdx, victim.type, hit, victim.health);
 
     if (victim.health == 0)
+    {
         victim.alive = false;
+        // Win condition: a side loses when its king dies. This is a
+        // simplification -- the original ties defeat to castle capture as
+        // much as king death, tracked through fractionKings/turn-queue
+        // bookkeeping this milestone doesn't port -- but king death is
+        // the clearest single condition to key off without that machinery.
+        if (victim.type == UNIT_TYPE_KING)
+        {
+            gameOver = true;
+            winnerColor = attacker.color;
+            Serial.printf("game over: color %d wins (king killed)\n", winnerColor);
+        }
+    }
 }
 
 // Resolves attackerIdx attacking victimIdx, then victimIdx's counterattack
@@ -523,8 +580,38 @@ constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
 // Handles a tap (as opposed to a drag-to-pan) at the given screen
 // coordinates: the END TURN button, selecting a movable unit belonging to
 // the current turn, or moving the selected unit to a reachable tile.
+// If u just moved onto an enemy/neutral fraction building it's equipped to
+// capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
+// and king for villages, king only for castles), flips its ownership to u's
+// color. Mutates mapTiles directly; the tile redraws next frame like any
+// other terrain change since drawViewport() reloads whatever tile index is
+// actually at each visible cell.
+void tryCaptureBuilding(const UnitPlacement &u)
+{
+    uint8_t tile = tileAt(u.tileX, u.tileY);
+    if (!isFractionBuilding(tile))
+        return;
+
+    int ownerFraction = buildingFraction(tile);
+    int myFraction = u.color + 1; // building fractions are 1-based; see UnitPlacement's comment
+    if (ownerFraction == myFraction)
+        return;
+
+    bool isCastle = TILE_TERRAIN_TYPE[tile] == 9;
+    bool canCapture = isCastle ? (UNIT_PROPERTIES[u.type] & UNIT_PROPERTY_CAPTURE_CASTLE)
+                                : (UNIT_PROPERTIES[u.type] & UNIT_PROPERTY_CAPTURE_VILLAGE);
+    if (!canCapture)
+        return;
+
+    mapTiles[u.tileX * mapHeight + u.tileY] = setBuildingFraction(tile, myFraction);
+    Serial.printf("unit captured %s at (%d,%d) for color %d\n", isCastle ? "castle" : "village", u.tileX, u.tileY, u.color);
+}
+
 void handleTap(int screenX, int screenY)
 {
+    if (gameOver)
+        return;
+
     if (screenX >= HUD_BTN_X && screenX < HUD_BTN_X + HUD_BTN_W &&
         screenY >= HUD_BTN_Y && screenY < HUD_BTN_Y + HUD_BTN_H)
     {
@@ -555,6 +642,7 @@ void handleTap(int screenX, int screenY)
             units[selectedUnit].tileX = (int16_t)mx;
             units[selectedUnit].tileY = (int16_t)my;
             units[selectedUnit].hasMoved = true;
+            tryCaptureBuilding(units[selectedUnit]);
         }
         selectedUnit = -1;
         drawViewport();
@@ -688,6 +776,21 @@ void drawViewport()
     gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
     gfx.setCursor(HUD_BTN_X + 6, HUD_BTN_Y + 7);
     gfx.print("END TURN");
+
+    if (gameOver)
+    {
+        constexpr int BANNER_H = 20;
+        int bannerY = (DISPLAY_HEIGHT - BANNER_H) / 2;
+        uint16_t winColor = winnerColor == 0 ? TFT_BLUE : TFT_RED;
+        gfx.fillRect(0, bannerY, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
+        gfx.drawFastHLine(0, bannerY, DISPLAY_WIDTH, winColor);
+        gfx.drawFastHLine(0, bannerY + BANNER_H - 1, DISPLAY_WIDTH, winColor);
+        gfx.setTextSize(2);
+        gfx.setTextColor(winColor, TFT_BLACK);
+        gfx.setCursor(30, bannerY + 4);
+        gfx.print(winnerColor == 0 ? "BLUE WINS" : "RED WINS");
+        gfx.setTextSize(1);
+    }
 
     gfx.endWrite();
 }
