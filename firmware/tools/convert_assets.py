@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Convert AE2RM J2ME assets into the raw formats the ESP32 firmware reads
-from the SD card for the minimal playable slice (map m0 only).
+from the SD card: the tiles0 tileset, unit icons, and all 8 story maps
+(m0-m7 -- the "m*.aem" set loadMap() always builds the same 2-side team
+queue for, see main.cpp's UnitPlacement comment; skirmish maps s0-s11
+aren't converted).
 
 Usage:
     pip install Pillow
@@ -21,14 +24,15 @@ Output layout on the SD card:
                                 written as the sentinel color TRANSPARENT_565
                                 (magenta) so the firmware can skip them when
                                 blitting -- these sprites aren't square.
-    /maps/m0.aem             -- copied as-is; the firmware's own map loader
-                                reads the same binary format the original
-                                MIDlet used (see aeii/MainDisplayable.java,
-                                loadMap()): int32 width, int32 height, then
-                                width*height tile-index bytes, then a
-                                building-color table and a list of unit
-                                placement records the firmware also parses
-                                (see main.cpp's loadMap()).
+    /maps/mN.aem              -- copied as-is for N in 0..7; the firmware's
+                                own map loader reads the same binary format
+                                the original MIDlet used (see
+                                aeii/MainDisplayable.java, loadMap()): int32
+                                width, int32 height, then width*height
+                                tile-index bytes, then a building-color
+                                table and a list of unit placement records
+                                the firmware also parses (see main.cpp's
+                                loadMap()).
 """
 import os
 import shutil
@@ -120,8 +124,11 @@ def main():
         convert_unit_icons(color, units_out)
         print(f"converted {color}/unit_icons.png -> units/{color}_*.bin ({UNIT_TYPE_COUNT} frames)")
 
-    shutil.copyfile(os.path.join(RES_DIR, "m0.aem"), os.path.join(maps_out, "m0.aem"))
-    print("copied m0.aem")
+    STORY_MAP_COUNT = 8  # m0.aem .. m7.aem
+    for i in range(STORY_MAP_COUNT):
+        name = f"m{i}.aem"
+        shutil.copyfile(os.path.join(RES_DIR, name), os.path.join(maps_out, name))
+        print(f"copied {name}")
 
     print(f"\nDone. Copy the contents of {OUT_DIR} onto the microSD card root.")
 

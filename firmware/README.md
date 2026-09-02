@@ -1,10 +1,10 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 5**:
-terrain, units, movement, and combat (milestones 1-4), plus village/castle
-capture and a win condition — a side loses when its king dies. Still no
-AI, no menus.
+not an automatic conversion — there's no JVM here. This is **milestone 6**:
+terrain, units, movement, combat, and capture (milestones 1-5), plus a
+mission menu covering all 8 story maps instead of just `m0`. Still no AI,
+no other menus.
 
 ## Target hardware
 
@@ -25,8 +25,9 @@ not yet confirmed on-device.
 - PlatformIO project targeting ESP32-S3, LovyanGFX display+touch driver
   configured for this exact display/touch combo (`include/LGFX_Config.h`)
 - Asset converter (`tools/convert_assets.py`) that turns the original
-  game's `tiles0_NN.png` tileset into raw RGB565 files and copies the
-  `m0.aem` map file, both onto a layout you copy to the microSD card
+  game's `tiles0_NN.png` tileset into raw RGB565 files and copies all 8
+  story map files (`m0.aem`-`m7.aem`), both onto a layout you copy to the
+  microSD card
 - Firmware that mounts the SD card, parses the original `.aem` map format
   (same binary layout `aeii/MainDisplayable.java`'s `loadMap()` reads:
   big-endian width/height, a column-major grid of tile-index bytes, a
@@ -36,14 +37,17 @@ not yet confirmed on-device.
 - Starting units drawn as static 24x24 map icons (`unit_icons.png`, one
   of 12 types x 4 team colors) at their map-file position, with
   transparent-pixel blitting so they don't cover terrain with a square
-  background. **Team-color assignment is exact for story maps** (`m0`-`m7`
-  -- only `m0` is actually converted/loaded by this firmware today, but the
-  mapping holds for the whole set): `MainDisplayable.java`'s `loadMap()`
-  always hardcodes the same 2-side turn queue for these (raw color 0 =
-  blue, 1 = red), so using each unit record's raw color slot directly is
-  correct here — it would NOT be for skirmish maps (`s0`-`s11`, not
+  background. **Team-color assignment is exact for story maps** (`m0`-`m7`,
+  all converted and playable): `MainDisplayable.java`'s `loadMap()` always
+  hardcodes the same 2-side turn queue for these (raw color 0 = blue, 1 =
+  red), so using each unit record's raw color slot directly is correct
+  here — it would NOT be for skirmish maps (`s0`-`s11`, not
   converted/loaded), which build a real building-derived queue for up to
-  4 sides; that logic isn't ported.
+  4 sides; that logic isn't ported. `m4` and `m6` place no color-1 (red)
+  units at all in their starting layout -- their extra encounters are
+  driven by the original's scripted mission events (`m*.script` files),
+  which aren't ported, so those two missions currently have less to
+  fight than intended.
 - Local hotseat movement (`firmware/src/main.cpp`): tap a unit belonging
   to the side whose turn it is to select it; its movement range lights up
   cyan, terrain-cost-limited by `UNIT_MOVE_RANGE` per unit type and
@@ -83,8 +87,15 @@ not yet confirmed on-device.
   simplification of the original, which ties defeat more to castle
   capture/`fractionKings` bookkeeping this milestone doesn't track --
   king death is the clearest single condition to key off without it. The
-  screen shows a "BLUE/RED WINS" banner and further taps are ignored;
-  there's no restart, so you'll need to reset the board to play again.
+  screen shows a "BLUE/RED WINS" banner; tapping it returns to the
+  mission menu (see below) rather than restarting in place.
+- Mission menu: boots to a list of "Mission 1"-"Mission 8" (`m0.aem`
+  through `m7.aem`) instead of loading `m0` directly. Labels are generic
+  -- the original's mission titles come from a localized string table
+  this firmware doesn't read. Tapping a row loads that map and resets all
+  per-game state (turn, selection, win/loss, camera position); the tile
+  and unit-icon asset caches are content-independent across maps and are
+  deliberately not reset. The win banner's tap-to-continue returns here.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
@@ -94,14 +105,16 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-A restart/rematch after a win, the combat property bonuses noted above,
-an AI opponent, the HUD beyond the turn indicator and END TURN button,
-menus, MIDI music (needs its own synth — see the "Music" question this
-was scoped against), and every map past `m0`. The original
-`MainDisplayable.java` is ~11,000 lines covering all of that; this
-milestone reads its map-loading format, terrain layer, unit starting
-positions, and enough movement/combat/capture rules for two people to
-pass a device back and forth and finish a game.
+Scripted mission events (`m*.script` files -- the extra encounters/
+triggers that make `m4` and `m6` more than "one starting skirmish"), the
+combat property bonuses noted above, an AI opponent, any HUD beyond the
+turn indicator/END TURN button/mission menu, MIDI music (needs its own
+synth — see the "Music" question this was scoped against), and skirmish
+maps (`s0`-`s11`). The original `MainDisplayable.java` is ~11,000 lines
+covering all of that; this milestone reads its map-loading format,
+terrain layer, unit starting positions, and enough movement/combat/
+capture rules for two people to pick any of the 8 story maps and play it
+to a conclusion.
 
 ## Build & flash
 
@@ -168,22 +181,25 @@ bad state.
 ## Verification status
 
 This was built and the asset converter was run and its output checked
-(header parses to the expected 12x12 map, m0's 6 unit records parse to
-plausible type/color/tile values, tile and unit-icon files are the
-expected size). The terrain-cost, unit-move-range, combat-stat
-(offence/defence/attack-range), and unit-property (`UNIT_PROPERTIES`)
-tables in `main.cpp` were cross-checked field-by-field against
-`tiles0.prop` and each `*.unit` file. **It has not been flashed to or
-run on physical hardware** — this session has no access to your board.
-Display/touch pins are confirmed; SD/MMC pins and WiFi/OTA are not —
-flash over USB first and report back what you see. The SD/MMC init,
-tile/unit rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
-`main.cpp` is a guess), and OTA path are the things most likely to need
-a follow-up fix once you can see real output.
+(all 8 maps' headers parse to plausible dimensions, every map's unit
+records parse to plausible type/color/tile values with zero leftover
+bytes, tile and unit-icon files are the expected size). The
+terrain-cost, unit-move-range, combat-stat (offence/defence/
+attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
+`main.cpp` were cross-checked field-by-field against `tiles0.prop` and
+each `*.unit` file. **It has not been flashed to or run on physical
+hardware** — this session has no access to your board. Display/touch
+pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
+first and report back what you see. The SD/MMC init, tile/unit
+rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
+`main.cpp` is a guess), menu tap hit-testing, and OTA path are the
+things most likely to need a follow-up fix once you can see real
+output.
 
 ## Suggested next milestones
 
-1. Get milestone 5 actually rendering and responding to touch on your
-   hardware (terrain + units + movement + combat + capture), fix
-   pins/driver/touch-threshold quirks that only show up on real silicon
-2. Menus, HUD, remaining maps, an AI opponent, music
+1. Get milestone 6 actually rendering and responding to touch on your
+   hardware (mission menu + terrain + units + movement + combat +
+   capture), fix pins/driver/touch-threshold quirks that only show up
+   on real silicon
+2. Scripted mission events, an AI opponent, music
