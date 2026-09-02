@@ -1,20 +1,24 @@
-// AE2RM ESP32 port -- milestone 6: mission menu, all 8 story maps.
+// AE2RM ESP32 port -- milestone 7: single-player vs. a basic AI.
 //
 // Boots to a mission menu (m0.aem-m7.aem, generic "Mission N" labels --
 // the original's mission titles come from a localized string table this
-// firmware doesn't read). Tap one to play: tap a unit belonging to the
-// current turn's side to select it -- its movement range highlights cyan
+// firmware doesn't read). Tap one to play: you are always blue, the
+// computer is always red. Tap a unit belonging to the current turn's
+// side to select it -- its movement range highlights cyan
 // (terrain-cost-limited flood fill) and any enemy already in its attack
 // range highlights red. Tap a cyan tile to move there (capturing a
 // village/castle you move onto, if this unit type can), tap a
 // red-highlighted enemy to attack it (one action per unit per turn --
 // this is "move OR attack", not the original's "move then attack"), tap
-// "END TURN" to pass to the other side. A side loses when its king dies
-// -- a simplification of the original's castle-capture-tied defeat
-// condition, see README -- and tapping the win banner returns to the
-// mission menu. Still no AI (two-human hotseat only -- see README for
-// why) and no other menus. Drag still pans the camera during a mission.
-// See firmware/README.md for what's implemented and what's next.
+// "END TURN" to pass to the AI, which immediately plays its whole turn
+// (attack in range, else move-and-attack, else close the distance -- see
+// aiActUnit()'s comment; not a port of the original's scoring-heuristic
+// AI) and hands back control. A side loses when its king dies -- a
+// simplification of the original's castle-capture-tied defeat condition,
+// see README -- and tapping the win banner, or the always-available MENU
+// button, returns to the mission menu. Drag still pans the camera during
+// a mission. See firmware/README.md for what's implemented and what's
+// next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -432,10 +436,18 @@ inline int manhattanDist(int x1, int y1, int x2, int y2)
     return abs(x1 - x2) + abs(y1 - y2);
 }
 
+// Generalized over an explicit origin (not just attacker.tileX/tileY) so
+// the AI can ask "could this unit attack from a hypothetical tile" while
+// planning a move, not just from where it's currently standing.
+bool inAttackRangeFrom(uint8_t type, int fromX, int fromY, int tx, int ty)
+{
+    int d = manhattanDist(fromX, fromY, tx, ty);
+    return d >= UNIT_ATTACK_RANGE_MIN[type] && d <= UNIT_ATTACK_RANGE_MAX[type] && UNIT_ATTACK_RANGE_MAX[type] > 0;
+}
+
 bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 {
-    int d = manhattanDist(attacker.tileX, attacker.tileY, tx, ty);
-    return d >= UNIT_ATTACK_RANGE_MIN[attacker.type] && d <= UNIT_ATTACK_RANGE_MAX[attacker.type] && UNIT_ATTACK_RANGE_MAX[attacker.type] > 0;
+    return inAttackRangeFrom(attacker.type, attacker.tileX, attacker.tileY, tx, ty);
 }
 
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
@@ -650,7 +662,134 @@ void handleMenuTap(int screenX, int screenY)
     }
 }
 
-void endTurn()
+void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the AI first
+
+// Color 1 (red) is always the computer side; color 0 (blue) is always the
+// human. There's no way to flip this -- single-player-vs-AI is the only
+// mode this milestone adds, on top of the two-human hotseat mode that
+// still works if you just never end the AI's turn... except you can't:
+// endTurn() below always auto-resolves color 1's turn through the AI.
+constexpr int AI_COLOR = 1;
+
+// Returns the index of the first living enemy of `color` that a unit of
+// `type` standing at (fromX,fromY) could attack, or -1. "First" in
+// units[] array order, not by any notion of best target -- this AI does
+// not prioritize targets (weakest, most valuable, etc.), unlike the
+// original's scoring heuristic (sub_10cb() and friends in
+// MainDisplayable.java, which this milestone does not port).
+int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
+{
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].alive && units[i].color != color && inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
+            return i;
+    }
+    return -1;
+}
+
+// A deliberately simple AI move for one unit, evaluated in this priority:
+//   1. Attack an enemy already in range from the current tile.
+//   2. Otherwise, if some reachable tile puts an enemy in range, move
+//      there and attack (this AI is allowed the original's "move then
+//      attack" -- see the note on handleTap() for why human play doesn't
+//      get that).
+//   3. Otherwise, move toward the nearest living enemy (by post-move
+//      distance) among reachable tiles, to close the gap for a future
+//      turn.
+//   4. If no enemies remain, do nothing.
+// No pathfinding beyond computeReachable()'s flood fill, no retreat/
+// defensive positioning, no target prioritization, no coordination
+// between units. This is enough to make single-player winnable and
+// losable, not a port of the original's AI.
+void aiActUnit(int idx)
+{
+    UnitPlacement &u = units[idx];
+
+    int target = findAttackTarget(u.type, u.color, u.tileX, u.tileY);
+    if (target >= 0)
+    {
+        attackUnit(idx, target);
+        u.hasMoved = true;
+        return;
+    }
+
+    computeReachable(u);
+    if (!reachableCost)
+    {
+        u.hasMoved = true; // can't plan a move this turn; don't get stuck retrying
+        return;
+    }
+
+    int nearestEnemy = -1, nearestDist = INT32_MAX;
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (!units[i].alive || units[i].color == u.color)
+            continue;
+        int d = manhattanDist(u.tileX, u.tileY, units[i].tileX, units[i].tileY);
+        if (d < nearestDist)
+        {
+            nearestDist = d;
+            nearestEnemy = i;
+        }
+    }
+    if (nearestEnemy < 0)
+    {
+        u.hasMoved = true; // nothing left to fight
+        return;
+    }
+
+    int moveToX = -1, moveToY = -1, bestApproachDist = nearestDist;
+    bool foundAttackTile = false;
+    for (int x = 0; x < mapWidth && !foundAttackTile; ++x)
+    {
+        for (int y = 0; y < mapHeight; ++y)
+        {
+            if (reachableCost[x * mapHeight + y] < 0)
+                continue;
+            if (unitIndexAt(x, y) >= 0 && !(x == u.tileX && y == u.tileY))
+                continue;
+            if (findAttackTarget(u.type, u.color, x, y) >= 0)
+            {
+                moveToX = x;
+                moveToY = y;
+                foundAttackTile = true;
+                break;
+            }
+            int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
+            if (d < bestApproachDist)
+            {
+                bestApproachDist = d;
+                moveToX = x;
+                moveToY = y;
+            }
+        }
+    }
+
+    if (moveToX >= 0)
+    {
+        u.tileX = (int16_t)moveToX;
+        u.tileY = (int16_t)moveToY;
+        tryCaptureBuilding(u);
+    }
+    u.hasMoved = true;
+
+    int postMoveTarget = findAttackTarget(u.type, u.color, u.tileX, u.tileY);
+    if (postMoveTarget >= 0)
+        attackUnit(idx, postMoveTarget);
+}
+
+void runAITurn()
+{
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].alive && units[i].color == currentTurn && !units[i].hasMoved)
+            aiActUnit(i);
+        if (gameOver) // e.g. this AI unit just killed the human king
+            return;
+    }
+}
+
+void switchTurn()
 {
     currentTurn = 1 - currentTurn;
     for (int i = 0; i < unitCount; ++i)
@@ -659,7 +798,23 @@ void endTurn()
             units[i].hasMoved = false;
     }
     selectedUnit = -1;
+}
+
+void endTurn()
+{
+    switchTurn();
     Serial.printf("turn: %s\n", currentTurn == 0 ? "blue" : "red");
+
+    if (currentTurn == AI_COLOR && !gameOver)
+    {
+        runAITurn();
+        if (!gameOver)
+        {
+            switchTurn();
+            Serial.println("turn: blue (AI done)");
+        }
+    }
+
     drawViewport();
 }
 

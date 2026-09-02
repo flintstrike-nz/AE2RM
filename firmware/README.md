@@ -1,10 +1,11 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 6**:
-terrain, units, movement, combat, and capture (milestones 1-5), plus a
-mission menu covering all 8 story maps instead of just `m0`. Still no AI,
-no other menus.
+not an automatic conversion — there's no JVM here. This is **milestone 7**:
+terrain, units, movement, combat, capture, and the mission menu
+(milestones 1-6), plus a basic AI opponent — you're always blue, the
+computer is always red, so this is now playable single-player. No other
+menus, no scripted mission events.
 
 ## Target hardware
 
@@ -54,7 +55,7 @@ not yet confirmed on-device.
   `TERRAIN_MOVE_COST` per tile type (both taken directly from the
   original's `.unit` files and `tiles0.prop` — see the tables' comments
   in `main.cpp`). Tap a highlighted tile to move there; tap END TURN to
-  pass to the other side and let its units move.
+  pass to the AI (see below).
 - Combat: any enemy unit already within the selected unit's attack range
   (`UNIT_ATTACK_RANGE_MIN`/`MAX` per type — e.g. archers can hit at 1-2
   tiles, the catapult only at 2-4) highlights red and is a valid tap
@@ -74,9 +75,23 @@ not yet confirmed on-device.
   attack" per turn, not the original's "move then attack" -- combining
   the two would need tracking attack range from every tile in the move
   range, not just the unit's current one, which is out of scope here.
-- **Still no AI** — both sides are driven by whoever is holding the
-  device; porting the original's AI (a large scoring heuristic spanning
-  much of `MainDisplayable.java`) is out of scope for this port so far.
+- Basic AI (`aiActUnit()` in `main.cpp`): color 1 (red) is always the
+  computer, color 0 (blue) is always you -- there's no way to flip this,
+  and the two-human hotseat mode from earlier milestones no longer
+  applies (`endTurn()` always auto-resolves red's turn through the AI).
+  Each AI unit, in order: attacks an enemy already in range from where it
+  stands; else, if some reachable tile puts an enemy in range, moves
+  there and attacks (the AI *is* allowed "move then attack" -- see the
+  note on `handleTap()` for why human play doesn't get that); else moves
+  toward the nearest living enemy to close the distance for a later turn;
+  else (no enemies left) does nothing. No pathfinding beyond
+  `computeReachable()`'s flood fill, no retreat or defensive
+  positioning, no target prioritization (it attacks the first eligible
+  enemy in array order, not the weakest or most valuable), and no
+  coordination between units. This is **not** a port of the original's
+  AI, which is a large scoring heuristic spanning much of
+  `MainDisplayable.java` (`sub_10cb()` and friends) -- it's enough to
+  make single-player winnable and losable, nothing more.
 - Village/castle capture: moving a unit onto an enemy or neutral
   fraction-building tile flips its ownership if that unit type is
   equipped to capture it, per each `.unit` file's `HasProperty` bits
@@ -113,14 +128,17 @@ not yet confirmed on-device.
 
 Scripted mission events (`m*.script` files -- the extra encounters/
 triggers that make `m4` and `m6` more than "one starting skirmish"), the
-combat property bonuses noted above, an AI opponent, any HUD beyond the
-turn indicator/END TURN button/mission menu, MIDI music (needs its own
+original's actual AI (this milestone's is a simple heuristic -- see
+above), the combat property bonuses noted above, any HUD beyond the turn
+indicator/END TURN/MENU buttons/mission menu, MIDI music (needs its own
 synth — see the "Music" question this was scoped against), and skirmish
-maps (`s0`-`s11`). The original `MainDisplayable.java` is ~11,000 lines
-covering all of that; this milestone reads its map-loading format,
-terrain layer, unit starting positions, and enough movement/combat/
-capture rules for two people to pick any of the 8 story maps and play it
-to a conclusion.
+maps (`s0`-`s11`, which would also need a 4-side, non-hardcoded turn
+queue -- see the team-color note above). The original
+`MainDisplayable.java` is ~11,000 lines covering all of that; this
+milestone reads its map-loading format, terrain layer, unit starting
+positions, and enough movement/combat/capture rules for a single-player
+skirmish against a basic AI on any of the 8 story maps, playable to a
+conclusion.
 
 ## Build & flash
 
@@ -196,16 +214,22 @@ attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
 each `*.unit` file. **It has not been flashed to or run on physical
 hardware** — this session has no access to your board. Display/touch
 pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
-first and report back what you see. The SD/MMC init, tile/unit
-rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
-`main.cpp` is a guess), menu tap hit-testing, and OTA path are the
-things most likely to need a follow-up fix once you can see real
-output.
+first and report back what you see. The AI's control flow is all bounded
+for-loops (over map cells, `unitCount`, or `UNIT_MOVE_RANGE` passes in
+`computeReachable()`) with no recursion or `while(true)`, so a hang isn't
+the concern; whether its choices actually look coherent once you can see
+them animate, and edge cases like a unit with zero reachable tiles
+(handled by falling through to `hasMoved = true` without a move, not
+verified at runtime), are. The SD/MMC init, tile/unit rendering,
+tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp` is a
+guess), menu tap hit-testing, and OTA path are the other things most
+likely to need a
+follow-up fix once you can see real output.
 
 ## Suggested next milestones
 
-1. Get milestone 6 actually rendering and responding to touch on your
+1. Get milestone 7 actually rendering and responding to touch on your
    hardware (mission menu + terrain + units + movement + combat +
-   capture), fix pins/driver/touch-threshold quirks that only show up
-   on real silicon
-2. Scripted mission events, an AI opponent, music
+   capture + AI), fix pins/driver/touch-threshold/AI-behavior quirks
+   that only show up on real silicon
+2. Scripted mission events, music, a smarter AI
