@@ -1,15 +1,15 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 13**:
+not an automatic conversion — there's no JVM here. This is **milestone 14**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11, 13) — you're always
 blue, the computer is always red, so this is playable single-player — a
-tap-to-inspect unit stat panel and living-unit-count HUD readout
-(milestones 9, 12), and `m0`'s intro cutscene, the first piece of the
-original's scripted mission events to be ported (milestone 10; see
-"Mission-script interpreter" below for exactly how much of the format that
-covers).
+tap-to-inspect unit stat panel, living-unit-count HUD readout, and RETRY
+button on the win/loss banner (milestones 9, 12, 14), and `m0`'s intro
+cutscene, the first piece of the original's scripted mission events to be
+ported (milestone 10; see "Mission-script interpreter" below for exactly
+how much of the format that covers).
 
 ## Target hardware
 
@@ -138,8 +138,10 @@ not yet confirmed on-device.
   simplification of the original, which ties defeat more to castle
   capture/`fractionKings` bookkeeping this milestone doesn't track --
   king death is the clearest single condition to key off without it. The
-  screen shows a "BLUE/RED WINS" banner; tapping it returns to the
-  mission menu (see below) rather than restarting in place.
+  screen shows a "BLUE/RED WINS" banner with a **RETRY** button that
+  reloads the same mission (`currentMapIndex`, set each time
+  `startGame()` runs) without a trip through the menu; tapping anywhere
+  else on the banner returns to the mission menu (see below) instead.
 - Unit stat panel: tapping any living unit that *isn't* selectable this
   turn (an enemy, or a friendly unit that's already moved) shows a small
   bottom-left panel with its type, current HP, attack/defence, attack
