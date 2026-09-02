@@ -137,8 +137,9 @@ queue -- see the team-color note above). The original
 `MainDisplayable.java` is ~11,000 lines covering all of that; this
 milestone reads its map-loading format, terrain layer, unit starting
 positions, and enough movement/combat/capture rules for a single-player
-skirmish against a basic AI on any of the 8 story maps, playable to a
-conclusion.
+skirmish against a basic AI, playable to a conclusion on the 6 story
+maps that start with red units to fight (`m4` and `m6` don't -- see
+above -- so those two can't yet reach the win condition).
 
 ## Build & flash
 
@@ -214,13 +215,18 @@ attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
 each `*.unit` file. **It has not been flashed to or run on physical
 hardware** — this session has no access to your board. Display/touch
 pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
-first and report back what you see. The AI's control flow is all bounded
-for-loops (over map cells, `unitCount`, or `UNIT_MOVE_RANGE` passes in
-`computeReachable()`) with no recursion or `while(true)`, so a hang isn't
-the concern; whether its choices actually look coherent once you can see
-them animate, and edge cases like a unit with zero reachable tiles
-(handled by falling through to `hasMoved = true` without a move, not
-verified at runtime), are. The SD/MMC init, tile/unit rendering,
+first and report back what you see. The AI has no recursion and no
+`while(true)`; its one loop with a runtime-dependent trip count
+(`computeReachable()`'s `while (changed)` relaxation) terminates because
+each cell's movement budget only increases and is capped by
+`UNIT_MOVE_RANGE`, so a hang isn't the structural risk. `endTurn()`
+resolves every AI unit's move/attack and mutates game state before a
+single `drawViewport()` call at the end -- there's no per-unit animation
+to watch, only the final board state, and whether that final state looks
+like a coherent turn (not e.g. every unit just sitting still) is
+unverified. So is the zero-reachable-tiles edge case (handled by falling
+through to `hasMoved = true` without a move). The SD/MMC init, tile/unit
+rendering,
 tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp` is a
 guess), menu tap hit-testing, and OTA path are the other things most
 likely to need a

@@ -193,11 +193,10 @@ static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
 static int8_t *reachableCost = nullptr;
 static int selectedUnit = -1; // index into units[], or -1 if none selected
 
-// Two-side hotseat only: 0 or 1, matching UnitPlacement::color directly
-// (see the comment on that struct). There is no AI opponent -- the "other"
-// side is just the second human player's turn. Porting the original's AI
-// (a large scoring heuristic across much of MainDisplayable.java) is out
-// of scope for this milestone.
+// 0 or 1, matching UnitPlacement::color directly (see the comment on that
+// struct). Color 1 is always AI-controlled (see AI_COLOR below) -- there
+// is no two-human hotseat mode anymore, endTurn() always resolves color
+// 1's turn through the AI synchronously before returning control.
 static int currentTurn = 0;
 
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
@@ -665,10 +664,9 @@ void handleMenuTap(int screenX, int screenY)
 void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the AI first
 
 // Color 1 (red) is always the computer side; color 0 (blue) is always the
-// human. There's no way to flip this -- single-player-vs-AI is the only
-// mode this milestone adds, on top of the two-human hotseat mode that
-// still works if you just never end the AI's turn... except you can't:
-// endTurn() below always auto-resolves color 1's turn through the AI.
+// human. There's no way to flip this, and no way to disable it either --
+// endTurn() below always auto-resolves color 1's turn through the AI, so
+// the two-human hotseat mode earlier milestones had no longer applies.
 constexpr int AI_COLOR = 1;
 
 // Returns the index of the first living enemy of `color` that a unit of
