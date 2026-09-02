@@ -150,9 +150,13 @@ bool readBE32(File &f, uint32_t &out)
 // milestone) then a count-prefixed list of {encoded type+color, x, y}
 // records (see aeii/MainDisplayable.java's loadMap(), the loop reading
 // `fractionKings`/units after the building data). Populates the global
-// `units`/`unitCount`. This is best-effort: a parse failure here logs a
-// warning and leaves `unitCount` at whatever was already read -- it must
-// not fail the map load, since the terrain already loaded successfully.
+// `units`/`unitCount`. This is best-effort and must not fail the map load,
+// since the terrain already loaded successfully: a failure before any
+// per-unit record is read (missing/implausible header fields, a bad seek)
+// leaves `unitCount` at 0; a failure partway through the record list (the
+// file is truncated) logs a warning and keeps whatever complete records
+// were already parsed rather than discarding them -- they're valid data,
+// just fewer than the file's stated count.
 void loadUnitPlacements(File &f, const char *path)
 {
     unitCount = 0;
