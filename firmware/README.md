@@ -1,9 +1,9 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 1**
-of that rewrite, scoped deliberately small: prove the asset pipeline and
-rendering path work on real hardware before porting any game rules.
+not an automatic conversion — there's no JVM here. This is **milestone 2**
+of that rewrite: terrain (milestone 1) plus each map's starting units,
+rendered statically — still no game rules.
 
 ## Target hardware
 
@@ -28,19 +28,33 @@ not yet confirmed on-device.
   `m0.aem` map file, both onto a layout you copy to the microSD card
 - Firmware that mounts the SD card, parses the original `.aem` map format
   (same binary layout `aeii/MainDisplayable.java`'s `loadMap()` reads:
-  big-endian width/height, then a column-major grid of tile-index bytes),
-  loads tile bitmaps on demand, and renders a scrollable viewport that you
-  pan by dragging on the touchscreen
+  big-endian width/height, a column-major grid of tile-index bytes, a
+  building-color table it skips over, then a count-prefixed list of unit
+  placement records), loads tile bitmaps on demand, and renders a
+  scrollable viewport that you pan by dragging on the touchscreen
+- Starting units drawn as static 24x24 map icons (`unit_icons.png`, one
+  of 12 types x 4 team colors) at their map-file position, with
+  transparent-pixel blitting so they don't cover terrain with a square
+  background. **The team-color assignment is an approximation** — it uses
+  the map file's raw color slot for each unit record directly, not the
+  original's scripted turn-queue logic (`fractionsTurnQueue` etc. in
+  `MainDisplayable.java`), which isn't ported. No movement, selection, or
+  animation yet -- units just sit where the map placed them.
+- Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
+  not internal SRAM -- two caches were already ~110KB as plain static
+  arrays (34% of the ~320KB internal RAM budget), and more asset types
+  are coming
 - WiFi + OTA updates (`ArduinoOTA`): flash once over USB, then push
   subsequent builds wirelessly — see "Build & flash" below
 
 ## What's not implemented yet
 
-Everything that makes it a game: units, movement, combat, buildings,
-turns, the HUD, menus, MIDI music (needs its own synth — see the “Music”
-question this was scoped against), and every map past `m0`. The original
-`MainDisplayable.java` is ~11,000 lines covering all of that; this
-milestone only reads its map-loading format and terrain layer.
+The actual game: movement, combat, buildings, turns, the correct
+team-color/turn-queue logic, the HUD, menus, MIDI music (needs its own
+synth — see the "Music" question this was scoped against), and every map
+past `m0`. The original `MainDisplayable.java` is ~11,000 lines covering
+all of that; this milestone only reads its map-loading format, terrain
+layer, and unit starting positions.
 
 ## Build & flash
 
@@ -107,18 +121,20 @@ bad state.
 ## Verification status
 
 This was built and the asset converter was run and its output checked
-(header parses to the expected 12x12 map, tile files are the expected
-size). **It has not been flashed to or run on physical hardware** — this
-session has no access to your board. Display/touch pins are confirmed;
-SD/MMC pins and WiFi/OTA are not — flash over USB first and report back
-what you see. The SD/MMC init, tile rendering, touch-pan loop, and OTA
-path are the things most likely to need a follow-up fix once you can see
-real output.
+(header parses to the expected 12x12 map, m0's 6 unit records parse to
+plausible type/color/tile values, tile and unit-icon files are the
+expected size). **It has not been flashed to or run on physical
+hardware** — this session has no access to your board. Display/touch
+pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
+first and report back what you see. The SD/MMC init, tile/unit
+rendering, touch-pan loop, and OTA path are the things most likely to
+need a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 
-1. Get milestone 1 actually rendering on your hardware, fix pins/driver
-   quirks that only show up on real silicon
-2. Port `Unit`/`Sprite` rendering (unit icons over the map, no logic yet)
-3. Port turn/movement rules from `MainDisplayable.java` for a single map
-4. Menus, HUD, remaining maps, combat, music
+1. Get milestone 2 actually rendering on your hardware (terrain + units),
+   fix pins/driver quirks that only show up on real silicon
+2. Port turn/movement rules from `MainDisplayable.java` for a single map,
+   including the real team-color/turn-queue logic this milestone
+   approximates
+3. Menus, HUD, remaining maps, combat, music

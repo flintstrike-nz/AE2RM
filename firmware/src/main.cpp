@@ -1,10 +1,11 @@
-// AE2RM ESP32 port -- milestone 1: render a real game map on real hardware.
+// AE2RM ESP32 port -- milestone 2: render map terrain + starting units.
 //
-// This does NOT yet include game rules, units, combat, or menus -- it is the
-// first proof that the asset pipeline and rendering path work end to end:
-// load the m0.aem map + tiles0 tileset from the SD card (converted by
-// tools/convert_assets.py) and let the player pan around it by touch/drag.
-// See firmware/README.md for what's implemented and what's next.
+// This does NOT yet include game rules, movement, combat, or menus -- units
+// are drawn statically at their map-file starting positions, with no turn
+// logic, selection, or animation. Loads m0.aem + tiles0 + unit_icons from
+// the SD card (converted by tools/convert_assets.py) and lets the player
+// pan around it by touch/drag. See firmware/README.md for what's
+// implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -30,7 +31,12 @@ static bool otaInProgress = false;
 constexpr int TILE_SIZE = 24;
 constexpr int TILE_COUNT = 48;
 
-static uint16_t tileCache[TILE_COUNT][TILE_SIZE * TILE_SIZE];
+// Asset frame caches live in PSRAM, not internal SRAM: two full caches
+// (tiles + unit icons) already used ~110KB of the ~320KB of internal RAM
+// as plain static arrays, and more asset types are coming in later
+// milestones. Allocated once in setup() by allocAssetCaches().
+static uint16_t *tileCachePixels = nullptr; // [TILE_COUNT][TILE_SIZE*TILE_SIZE], flattened
+inline uint16_t *tileFrame(int index) { return tileCachePixels + (size_t)index * TILE_SIZE * TILE_SIZE; }
 static bool tileLoaded[TILE_COUNT] = {false};
 
 static uint8_t *mapTiles = nullptr; // [x * mapHeight + y], matches the
@@ -38,6 +44,40 @@ static uint8_t *mapTiles = nullptr; // [x * mapHeight + y], matches the
                                      // reads from the .aem file
 static int mapWidth = 0;
 static int mapHeight = 0;
+
+// Unit map-icons: Unit.UNIT_NAMES has 12 types; unit_icons.png comes in 4
+// team colors (MainDisplayable.FRACTION_COLOR_PREFIXES order). tools/
+// convert_assets.py writes transparent source pixels as this sentinel so
+// pushImage() can skip them -- these icons aren't square.
+constexpr int UNIT_ICON_SIZE = 24;
+constexpr int UNIT_TYPE_COUNT = 12;
+constexpr int UNIT_COLOR_COUNT = 4;
+constexpr uint16_t TRANSPARENT_565 = 0xF81F;
+static const char *UNIT_COLOR_NAMES[UNIT_COLOR_COUNT] = {"blue", "red", "green", "black"};
+
+static uint16_t *unitIconCachePixels = nullptr; // [UNIT_COLOR_COUNT*UNIT_TYPE_COUNT][UNIT_ICON_SIZE*UNIT_ICON_SIZE], flattened
+inline uint16_t *unitIconFrame(int color, int type)
+{
+    return unitIconCachePixels + ((size_t)color * UNIT_TYPE_COUNT + type) * UNIT_ICON_SIZE * UNIT_ICON_SIZE;
+}
+static bool unitIconLoaded[UNIT_COLOR_COUNT][UNIT_TYPE_COUNT] = {};
+
+// A unit placement read from the map file's trailing unit-record list.
+// This reflects where MainDisplayable.java's loadMap() places starting
+// units, but NOT its actual team-color logic (that goes through the
+// scripted turn queue, which isn't ported). `color` here is simply the
+// map file's raw color slot (0-3, indexing UNIT_COLOR_NAMES directly) --
+// close enough for a static rendering milestone, not authoritative.
+struct UnitPlacement
+{
+    uint8_t type;
+    uint8_t color;
+    int16_t tileX;
+    int16_t tileY;
+};
+constexpr int MAX_UNITS = 64;
+static UnitPlacement units[MAX_UNITS];
+static int unitCount = 0;
 
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
 static int viewY = 0;
@@ -57,15 +97,110 @@ bool loadTile(int index)
         Serial.printf("tile load failed: %s\n", path);
         return false;
     }
-    size_t got = f.read(reinterpret_cast<uint8_t *>(tileCache[index]), sizeof(tileCache[index]));
+    constexpr size_t FRAME_BYTES = TILE_SIZE * TILE_SIZE * sizeof(uint16_t);
+    size_t got = f.read(reinterpret_cast<uint8_t *>(tileFrame(index)), FRAME_BYTES);
     f.close();
-    if (got != sizeof(tileCache[index]))
+    if (got != FRAME_BYTES)
     {
-        Serial.printf("tile %d short read (%u/%u bytes)\n", index, (unsigned)got, (unsigned)sizeof(tileCache[index]));
+        Serial.printf("tile %d short read (%u/%u bytes)\n", index, (unsigned)got, (unsigned)FRAME_BYTES);
         return false;
     }
     tileLoaded[index] = true;
     return true;
+}
+
+bool loadUnitIcon(int color, int type)
+{
+    if (color < 0 || color >= UNIT_COLOR_COUNT || type < 0 || type >= UNIT_TYPE_COUNT)
+        return false;
+    if (unitIconLoaded[color][type])
+        return true;
+
+    char path[48];
+    snprintf(path, sizeof(path), "/units/%s_%02d.bin", UNIT_COLOR_NAMES[color], type);
+    File f = SD_MMC.open(path, FILE_READ);
+    if (!f)
+    {
+        Serial.printf("unit icon load failed: %s\n", path);
+        return false;
+    }
+    constexpr size_t FRAME_BYTES = UNIT_ICON_SIZE * UNIT_ICON_SIZE * sizeof(uint16_t);
+    size_t got = f.read(reinterpret_cast<uint8_t *>(unitIconFrame(color, type)), FRAME_BYTES);
+    f.close();
+    if (got != FRAME_BYTES)
+    {
+        Serial.printf("unit icon %s short read (%u/%u bytes)\n", path, (unsigned)got, (unsigned)FRAME_BYTES);
+        return false;
+    }
+    unitIconLoaded[color][type] = true;
+    return true;
+}
+
+bool readBE32(File &f, uint32_t &out)
+{
+    uint8_t b[4];
+    if (f.read(b, 4) != 4)
+        return false;
+    out = (uint32_t(b[0]) << 24) | (uint32_t(b[1]) << 16) | (uint32_t(b[2]) << 8) | b[3];
+    return true;
+}
+
+// Parses the unit-placement records that follow the tile grid in a .aem
+// file: a building-color table (skipped -- not used by this rendering-only
+// milestone) then a count-prefixed list of {encoded type+color, x, y}
+// records (see aeii/MainDisplayable.java's loadMap(), the loop reading
+// `fractionKings`/units after the building data). Populates the global
+// `units`/`unitCount`. This is best-effort: a parse failure here logs a
+// warning and leaves `unitCount` at whatever was already read -- it must
+// not fail the map load, since the terrain already loaded successfully.
+void loadUnitPlacements(File &f, const char *path)
+{
+    unitCount = 0;
+
+    uint32_t buildingColorCount;
+    if (!readBE32(f, buildingColorCount) || buildingColorCount > 4096)
+    {
+        Serial.printf("map %s: no/implausible unit data, skipping\n", path);
+        return;
+    }
+    if (!f.seek((uint32_t)buildingColorCount * 4, SeekCur))
+    {
+        Serial.printf("map %s: couldn't seek past building-color table\n", path);
+        return;
+    }
+
+    uint32_t rawUnitCount;
+    if (!readBE32(f, rawUnitCount))
+    {
+        Serial.printf("map %s: no unit count, skipping unit data\n", path);
+        return;
+    }
+
+    int toLoad = (int)min(rawUnitCount, (uint32_t)MAX_UNITS);
+    for (int i = 0; i < toLoad; ++i)
+    {
+        uint8_t rec[5];
+        if (f.read(rec, 5) != 5)
+        {
+            Serial.printf("map %s: truncated unit records, loaded %d\n", path, unitCount);
+            return;
+        }
+        uint8_t encoded = rec[0];
+        int16_t xPx = (int16_t)(uint16_t((rec[1] << 8) | rec[2]));
+        int16_t yPx = (int16_t)(uint16_t((rec[3] << 8) | rec[4]));
+        uint8_t type = encoded % UNIT_TYPE_COUNT;
+        uint8_t color = encoded / UNIT_TYPE_COUNT;
+        if (color >= UNIT_COLOR_COUNT)
+            continue; // outside the 4 team colors this milestone can render
+
+        units[unitCount].type = type;
+        units[unitCount].color = color;
+        units[unitCount].tileX = xPx / TILE_SIZE;
+        units[unitCount].tileY = yPx / TILE_SIZE;
+        ++unitCount;
+    }
+
+    Serial.printf("map %s: %d unit placements (of %lu in file)\n", path, unitCount, (unsigned long)rawUnitCount);
 }
 
 bool loadMap(const char *path)
@@ -123,12 +258,14 @@ bool loadMap(const char *path)
         f.close();
         return false;
     }
-    f.close();
 
     free(mapTiles);
     mapTiles = newTiles;
     mapWidth = width;
     mapHeight = height;
+
+    loadUnitPlacements(f, path); // best-effort; see its own comment
+    f.close();
 
     Serial.printf("loaded map %s: %dx%d tiles\n", path, mapWidth, mapHeight);
     return true;
@@ -167,6 +304,14 @@ void drawViewport()
             loadTile(tileAt(mx, my));
         }
     }
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].tileX >= firstCol && units[i].tileX < firstCol + cols &&
+            units[i].tileY >= firstRow && units[i].tileY < firstRow + rows)
+        {
+            loadUnitIcon(units[i].color, units[i].type);
+        }
+    }
 
     gfx.startWrite();
     for (int row = 0; row < rows; ++row)
@@ -191,9 +336,22 @@ void drawViewport()
                 continue;
             }
 
-            gfx.pushImage(px, py, TILE_SIZE, TILE_SIZE, tileCache[tile]);
+            gfx.pushImage(px, py, TILE_SIZE, TILE_SIZE, tileFrame(tile));
         }
     }
+
+    for (int i = 0; i < unitCount; ++i)
+    {
+        const UnitPlacement &u = units[i];
+        if (!unitIconLoaded[u.color][u.type])
+            continue; // out of view this frame, or failed to load
+        int px = u.tileX * TILE_SIZE - viewX;
+        int py = u.tileY * TILE_SIZE - viewY;
+        if (px <= -UNIT_ICON_SIZE || py <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
+            continue;
+        gfx.pushImage(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, unitIconFrame(u.color, u.type), TRANSPARENT_565);
+    }
+
     gfx.endWrite();
 }
 
@@ -279,6 +437,27 @@ void setupOTA()
     delay(500);
 }
 
+// Allocates tileCachePixels/unitIconCachePixels from PSRAM. Fatal if it
+// fails -- board_pins.h/platformio.ini target a module with PSRAM, so a
+// failure here means PSRAM didn't init, not that it's merely full.
+bool allocAssetCaches()
+{
+    size_t tileBytes = (size_t)TILE_COUNT * TILE_SIZE * TILE_SIZE * sizeof(uint16_t);
+    size_t unitBytes = (size_t)UNIT_COLOR_COUNT * UNIT_TYPE_COUNT * UNIT_ICON_SIZE * UNIT_ICON_SIZE * sizeof(uint16_t);
+
+    tileCachePixels = static_cast<uint16_t *>(ps_malloc(tileBytes));
+    unitIconCachePixels = static_cast<uint16_t *>(ps_malloc(unitBytes));
+
+    if (!tileCachePixels || !unitIconCachePixels)
+    {
+        Serial.printf("PSRAM allocation failed (tiles %u bytes: %s, units %u bytes: %s)\n",
+                       (unsigned)tileBytes, tileCachePixels ? "ok" : "FAILED",
+                       (unsigned)unitBytes, unitIconCachePixels ? "ok" : "FAILED");
+        return false;
+    }
+    return true;
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -301,6 +480,13 @@ void setup()
     gfx.setCursor(10, 10);
     gfx.println("AE2RM ESP32");
     gfx.println("booting...");
+
+    if (!allocAssetCaches())
+    {
+        gfx.println("PSRAM alloc failed!");
+        while (true)
+            delay(1000);
+    }
 
     // SD card is wired as SD/MMC 4-bit, on its own dedicated pins (not
     // shared with the display's SPI bus).
