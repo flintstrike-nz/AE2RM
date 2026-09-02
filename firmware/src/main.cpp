@@ -1009,6 +1009,15 @@ void handleTap(int screenX, int screenY)
             units[selectedUnit].hasMoved = true;
             tryCaptureBuilding(units[selectedUnit]);
         }
+        else if (targetIdx >= 0)
+        {
+            // Tapped a unit that wasn't a valid attack target from here (out
+            // of range, or on the current player's own side) -- deselecting
+            // silently would make tap-to-inspect need a second tap on any
+            // unit tapped while another was already selected. Show its
+            // panel instead, same as tapping it with nothing selected would.
+            infoUnit = targetIdx;
+        }
         selectedUnit = -1;
         drawViewport();
         return;
