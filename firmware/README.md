@@ -89,16 +89,21 @@ not yet confirmed on-device.
   the AI already shows this is doable by scanning every reachable tile
   for an attack opportunity, but doing that live as a human drags a
   selection around -- highlighting which of many reachable tiles also
-  opens an attack -- is more UI than this milestone scoped); else, if
-  this unit's own health is at or below 25, retreats -- moves to
-  whichever reachable tile is *farthest* from the nearest enemy, instead
-  of closing the distance, to avoid handing away a free kill; else moves
-  toward the nearest living enemy to close the distance for a later turn;
-  else (no enemies left) does nothing. When it does attack, it targets
-  the *weakest* in-range enemy by current health (`findAttackTarget()`),
-  not just the first one found in array order -- finishing off a
-  damaged unit is a permanent gain, splitting damage across several
-  full-health enemies isn't. No pathfinding beyond
+  opens an attack -- is more UI than this milestone scoped; every
+  reachable attack-capable tile is scored, not just the first one found
+  in scan order, and the tile giving the lowest-health target wins);
+  else, if this unit's own health is at or below 25, retreats -- moves
+  to whichever reachable tile *maximizes* its distance to the *closest*
+  living enemy (scored against every enemy on the board, not just
+  whichever one was nearest before moving -- with enemies on multiple
+  sides, only that minimum says how exposed a tile actually leaves the
+  unit), instead of closing the distance, to avoid handing away a free
+  kill; else moves toward the nearest living enemy to close the distance
+  for a later turn; else (no enemies left) does nothing. When it does
+  attack, it targets the *weakest* in-range enemy by current health
+  (`findAttackTarget()`), not just the first one found in array order --
+  finishing off a damaged unit is a permanent gain, splitting damage
+  across several full-health enemies isn't. No pathfinding beyond
   `computeReachable()`'s flood fill, no defensive positioning beyond
   that one retreat rule, no value-based target prioritization (weakest
   by *health*, not by unit type or tactical importance), and no

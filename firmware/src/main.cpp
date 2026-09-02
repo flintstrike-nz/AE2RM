@@ -697,12 +697,18 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //   2. Otherwise, if some reachable tile puts an enemy in range, move
 //      there and attack (this AI is allowed the original's "move then
 //      attack" -- see the note on handleTap() for why human play doesn't
-//      get that).
+//      get that). Every reachable attack-capable tile is checked, not just
+//      the first found, and the one whose target has the lowest health
+//      wins -- so this path shares findAttackTarget()'s weakest-first rule
+//      instead of taking whatever attack the scan order turns up first.
 //   3. Otherwise, if this unit's health is critically low (<=25), move to
-//      whichever reachable tile is FARTHEST from the nearest enemy, to
-//      avoid taking a free hit next turn -- crude self-preservation, not
-//      real defensive positioning (no cover/terrain-bonus awareness, no
-//      regard for whether retreating abandons an objective).
+//      whichever reachable tile MAXIMIZES its distance to the CLOSEST
+//      living enemy (checked against every enemy, not just the one
+//      nearest before moving -- with enemies on multiple sides, only that
+//      minimum says how exposed a tile actually leaves the unit) --
+//      crude self-preservation, not real defensive positioning (no
+//      cover/terrain-bonus awareness, no regard for whether retreating
+//      abandons an objective).
 //   4. Otherwise, move toward the nearest living enemy (by post-move
 //      distance) among reachable tiles, to close the gap for a future
 //      turn.
@@ -751,9 +757,17 @@ void aiActUnit(int idx)
     constexpr int RETREAT_HEALTH_THRESHOLD = 25;
     bool retreating = u.health <= RETREAT_HEALTH_THRESHOLD;
 
-    int moveToX = -1, moveToY = -1, bestApproachDist = nearestDist;
-    bool foundAttackTile = false;
-    for (int x = 0; x < mapWidth && !foundAttackTile; ++x)
+    // A full scan, not a first-match: an attack-capable tile found early in
+    // x/y order must not win over a later one that reaches a weaker target,
+    // and (for retreat) distance-to-the-single-nearest-enemy isn't a safe
+    // score once there's more than one enemy on the board -- maximizing it
+    // can walk the unit straight at a different enemy. So every reachable
+    // tile is scored fully before moveToX/Y is committed below.
+    int moveToX = -1, moveToY = -1;
+    int bestApproachDist = nearestDist;  // used only when !retreating
+    int bestRetreatMinDist = -1;         // used only when retreating
+    int attackTileX = -1, attackTileY = -1, attackTargetHealth = INT32_MAX;
+    for (int x = 0; x < mapWidth; ++x)
     {
         for (int y = 0; y < mapHeight; ++y)
         {
@@ -761,21 +775,59 @@ void aiActUnit(int idx)
                 continue;
             if (unitIndexAt(x, y) >= 0 && !(x == u.tileX && y == u.tileY))
                 continue;
-            if (findAttackTarget(u.type, u.color, x, y) >= 0)
+
+            int tileTarget = findAttackTarget(u.type, u.color, x, y);
+            if (tileTarget >= 0)
             {
-                moveToX = x;
-                moveToY = y;
-                foundAttackTile = true;
-                break;
+                if (attackTileX < 0 || units[tileTarget].health < attackTargetHealth)
+                {
+                    attackTileX = x;
+                    attackTileY = y;
+                    attackTargetHealth = units[tileTarget].health;
+                }
+                continue; // an attack-capable tile never competes with approach/retreat
             }
-            int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
-            if (retreating ? (d > bestApproachDist) : (d < bestApproachDist))
+
+            if (retreating)
             {
-                bestApproachDist = d;
-                moveToX = x;
-                moveToY = y;
+                // Distance to the CLOSEST living enemy from this tile, not
+                // just to whichever enemy was nearest before moving -- with
+                // enemies on multiple sides, only the minimum across all of
+                // them tells you how exposed this tile actually leaves the
+                // unit.
+                int minDist = INT32_MAX;
+                for (int i = 0; i < unitCount; ++i)
+                {
+                    if (!units[i].alive || units[i].color == u.color)
+                        continue;
+                    int d = manhattanDist(x, y, units[i].tileX, units[i].tileY);
+                    if (d < minDist)
+                        minDist = d;
+                }
+                if (minDist > bestRetreatMinDist)
+                {
+                    bestRetreatMinDist = minDist;
+                    moveToX = x;
+                    moveToY = y;
+                }
+            }
+            else
+            {
+                int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
+                if (d < bestApproachDist)
+                {
+                    bestApproachDist = d;
+                    moveToX = x;
+                    moveToY = y;
+                }
             }
         }
+    }
+
+    if (attackTileX >= 0)
+    {
+        moveToX = attackTileX;
+        moveToY = attackTileY;
     }
 
     if (moveToX >= 0)
