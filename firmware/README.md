@@ -45,10 +45,13 @@ not yet confirmed on-device.
   here — it would NOT be for skirmish maps (`s0`-`s11`, not
   converted/loaded), which build a real building-derived queue for up to
   4 sides; that logic isn't ported. `m4` and `m6` place no color-1 (red)
-  units at all in their starting layout -- their extra encounters are
-  driven by the original's scripted mission events (`m*.script` files),
-  which aren't ported, so those two missions currently have less to
-  fight than intended.
+  units at all in their starting layout. It's tempting to blame this on
+  unported mission scripting, but that doesn't hold up: the source
+  archive this port builds from contains a `.script` file (a real
+  cutscene/dialog interpreter language) for `m0` only, not for any of
+  `m1`-`m7` -- and the other five (`m1`,`m2`,`m3`,`m5`,`m7`) work fine
+  without one. Why `m4`/`m6` specifically ship with no starting
+  opposition in their `.aem` data isn't known.
 - Local hotseat movement (`firmware/src/main.cpp`): tap a unit belonging
   to the side whose turn it is to select it; its movement range lights up
   cyan, terrain-cost-limited by `UNIT_MOVE_RANGE` per unit type and
@@ -86,12 +89,19 @@ not yet confirmed on-device.
   the AI already shows this is doable by scanning every reachable tile
   for an attack opportunity, but doing that live as a human drags a
   selection around -- highlighting which of many reachable tiles also
-  opens an attack -- is more UI than this milestone scoped); else moves
+  opens an attack -- is more UI than this milestone scoped); else, if
+  this unit's own health is at or below 25, retreats -- moves to
+  whichever reachable tile is *farthest* from the nearest enemy, instead
+  of closing the distance, to avoid handing away a free kill; else moves
   toward the nearest living enemy to close the distance for a later turn;
-  else (no enemies left) does nothing. No pathfinding beyond
-  `computeReachable()`'s flood fill, no retreat or defensive
-  positioning, no target prioritization (it attacks the first eligible
-  enemy in array order, not the weakest or most valuable), and no
+  else (no enemies left) does nothing. When it does attack, it targets
+  the *weakest* in-range enemy by current health (`findAttackTarget()`),
+  not just the first one found in array order -- finishing off a
+  damaged unit is a permanent gain, splitting damage across several
+  full-health enemies isn't. No pathfinding beyond
+  `computeReachable()`'s flood fill, no defensive positioning beyond
+  that one retreat rule, no value-based target prioritization (weakest
+  by *health*, not by unit type or tactical importance), and no
   coordination between units. This is **not** a port of the original's
   AI, which is a large scoring heuristic spanning much of
   `MainDisplayable.java` (`sub_10cb()` and friends) -- it's enough to
@@ -117,8 +127,8 @@ not yet confirmed on-device.
   deliberately not reset. The win banner's tap-to-continue returns here --
   and so does a dedicated **MENU** button, always available during a
   mission regardless of game state. That button isn't optional polish:
-  `m4`/`m6` place no red units and their scripted spawns aren't ported,
-  so those two missions can never trigger the king-death win condition --
+  `m4`/`m6` place no red units in their map data (see above), so those
+  two missions can never trigger the king-death win condition --
   without an unconditional way out, playing one would permanently strand
   you in STATE_PLAYING.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
@@ -130,8 +140,10 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-Scripted mission events (`m*.script` files -- the extra encounters/
-triggers that make `m4` and `m6` more than "one starting skirmish"), the
+`m0`'s mission-script interpreter (a real cutscene/dialog language --
+camera moves, `ShowDialog`, unit spawning/removal, etc. -- present as a
+`.script` file for `m0` only in the source archive; not what's causing
+`m4`/`m6`'s missing red units, see above), the
 original's actual AI (this milestone's is a simple heuristic -- see
 above), the combat property bonuses noted above, any HUD beyond the turn
 indicator/END TURN/MENU buttons/mission menu, MIDI music (needs its own
@@ -240,4 +252,4 @@ most likely to need a follow-up fix once you can see real output.
    hardware (mission menu + terrain + units + movement + combat +
    capture + AI), fix pins/driver/touch-threshold/AI-behavior quirks
    that only show up on real silicon
-2. Scripted mission events, music, a smarter AI
+2. `m0`'s mission-script interpreter, music, a smarter AI

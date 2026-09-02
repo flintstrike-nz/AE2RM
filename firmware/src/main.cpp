@@ -669,20 +669,27 @@ void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the A
 // the two-human hotseat mode earlier milestones had no longer applies.
 constexpr int AI_COLOR = 1;
 
-// Returns the index of the first living enemy of `color` that a unit of
-// `type` standing at (fromX,fromY) could attack, or -1. "First" in
-// units[] array order, not by any notion of best target -- this AI does
-// not prioritize targets (weakest, most valuable, etc.), unlike the
-// original's scoring heuristic (sub_10cb() and friends in
-// MainDisplayable.java, which this milestone does not port).
+// Returns the index of the lowest-health living enemy of `color` that a
+// unit of `type` standing at (fromX,fromY) could attack, or -1 if none
+// are in range. "Weakest by current health" is the one prioritization
+// this AI does -- it's not the original's scoring heuristic (sub_10cb()
+// and friends in MainDisplayable.java, which weighs many more factors
+// and isn't ported), just a cheap, obviously-better-than-arbitrary rule:
+// finishing off a damaged unit removes it from the board for good,
+// whereas splitting damage across several full-health enemies doesn't.
 int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 {
+    int best = -1;
     for (int i = 0; i < unitCount; ++i)
     {
-        if (units[i].alive && units[i].color != color && inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
-            return i;
+        if (!units[i].alive || units[i].color == color)
+            continue;
+        if (!inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
+            continue;
+        if (best < 0 || units[i].health < units[best].health)
+            best = i;
     }
-    return -1;
+    return best;
 }
 
 // A deliberately simple AI move for one unit, evaluated in this priority:
@@ -691,13 +698,18 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //      there and attack (this AI is allowed the original's "move then
 //      attack" -- see the note on handleTap() for why human play doesn't
 //      get that).
-//   3. Otherwise, move toward the nearest living enemy (by post-move
+//   3. Otherwise, if this unit's health is critically low (<=25), move to
+//      whichever reachable tile is FARTHEST from the nearest enemy, to
+//      avoid taking a free hit next turn -- crude self-preservation, not
+//      real defensive positioning (no cover/terrain-bonus awareness, no
+//      regard for whether retreating abandons an objective).
+//   4. Otherwise, move toward the nearest living enemy (by post-move
 //      distance) among reachable tiles, to close the gap for a future
 //      turn.
-//   4. If no enemies remain, do nothing.
-// No pathfinding beyond computeReachable()'s flood fill, no retreat/
-// defensive positioning, no target prioritization, no coordination
-// between units. This is enough to make single-player winnable and
+//   5. If no enemies remain, do nothing.
+// No pathfinding beyond computeReachable()'s flood fill, no coordination
+// between units, no target prioritization beyond findAttackTarget()'s
+// weakest-first rule. This is enough to make single-player winnable and
 // losable, not a port of the original's AI.
 void aiActUnit(int idx)
 {
@@ -736,6 +748,9 @@ void aiActUnit(int idx)
         return;
     }
 
+    constexpr int RETREAT_HEALTH_THRESHOLD = 25;
+    bool retreating = u.health <= RETREAT_HEALTH_THRESHOLD;
+
     int moveToX = -1, moveToY = -1, bestApproachDist = nearestDist;
     bool foundAttackTile = false;
     for (int x = 0; x < mapWidth && !foundAttackTile; ++x)
@@ -754,7 +769,7 @@ void aiActUnit(int idx)
                 break;
             }
             int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
-            if (d < bestApproachDist)
+            if (retreating ? (d > bestApproachDist) : (d < bestApproachDist))
             {
                 bestApproachDist = d;
                 moveToX = x;
@@ -823,8 +838,8 @@ constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
 
 // Always-available way back to the mission menu, independent of gameOver.
 // Without this, a mission whose win condition can never trigger (m4/m6
-// place no red units, and their scripted spawns aren't ported -- see
-// README) would trap the player in STATE_PLAYING with no way out.
+// place no red units in their map data -- see README) would trap the
+// player in STATE_PLAYING with no way out.
 constexpr int MENU_BTN_W = 50;
 constexpr int MENU_BTN_H = 16;
 constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;

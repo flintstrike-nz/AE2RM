@@ -48,13 +48,15 @@ the full pinout and hardware details.
 
 ### What's not there yet
 
-An AI on par with the original, and the original's scripted mid-mission
-events — two of the eight story maps (`m4`, `m6`) start with zero enemy
-units and rely entirely on those scripted spawns, so they can't reach
-the win condition at all in single-player yet, not just "fewer enemies
-than intended." Also missing: in-game menus beyond mission select, and
-MIDI music (the original's music format needs its own synthesizer —
-there's no audio subsystem yet). See
+An AI on par with the original; two of the eight story maps (`m4`, `m6`)
+start with zero enemy units in their map data and so can't reach the
+win condition at all in single-player yet — the reason isn't fully
+known (the source archive this port builds from has no mission-script
+file for any map except `m0`, so it's not that a script for these two
+specifically is missing and unported; it applies equally to `m1`,
+`m2`, `m3`, `m5`, `m7`, which do work). Also missing: in-game menus
+beyond mission select, and MIDI music (the original's music format
+needs its own synthesizer — there's no audio subsystem yet). See
 [`firmware/README.md`](firmware/README.md) for the full list and the
 reasoning behind each scoping decision.
 
@@ -86,8 +88,11 @@ history.
 - Get milestone 7 actually running on the physical board and fix
   whatever real hardware reveals — pins, touch feel, timing, AI behavior
   you can actually watch
-- Scripted mission events (the `m*.script` files the two thinner
-  missions, `m4`/`m6`, are missing)
+- Port `m0`'s mission-script interpreter (the only `.script` file in
+  the source archive; a real cutscene/dialog language -- camera moves,
+  `ShowDialog`, unit spawning/removal, etc.) and investigate whether
+  `m4`/`m6`'s missing red units are recoverable some other way, since
+  no script exists to explain it
 - MIDI music via a small on-device synthesizer
 - A stronger AI (target prioritization, defensive positioning, closer
   to the original's scoring heuristic)
