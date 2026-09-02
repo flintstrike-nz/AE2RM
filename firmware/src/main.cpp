@@ -396,8 +396,12 @@ void resolveHit(int attackerIdx, int victimIdx)
     UnitPlacement &victim = units[victimIdx];
 
     int offence = random(UNIT_OFFENCE_MIN[attacker.type], UNIT_OFFENCE_MAX[attacker.type]);
-    uint8_t terrainType = TILE_TERRAIN_TYPE[tileAt(victim.tileX, victim.tileY)];
-    int defence = UNIT_DEFENCE[victim.type] + TERRAIN_DEFENCE_BONUS[terrainType];
+    uint8_t victimTile = tileAt(victim.tileX, victim.tileY);
+    // Same guard as computeReachable()'s: a corrupt/out-of-range tile index
+    // shouldn't read past TILE_TERRAIN_TYPE/TERRAIN_DEFENCE_BONUS -- treat
+    // it as no terrain bonus rather than crashing mid-combat.
+    int terrainBonus = victimTile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[victimTile]] : 0;
+    int defence = UNIT_DEFENCE[victim.type] + terrainBonus;
 
     int hit = (offence - defence) * attacker.health / 100;
     hit = constrain(hit, 0, (int)victim.health);
