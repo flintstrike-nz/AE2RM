@@ -1,11 +1,10 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 4**:
-terrain (milestone 1), units (milestone 2), movement (milestone 3), plus
-combat — select a unit, move it or attack an enemy already in range, tap
-END TURN to pass to the other side. Still no buildings/capture, no AI, no
-menus.
+not an automatic conversion — there's no JVM here. This is **milestone 5**:
+terrain, units, movement, and combat (milestones 1-4), plus village/castle
+capture and a win condition — a side loses when its king dies. Still no
+AI, no menus.
 
 ## Target hardware
 
@@ -60,8 +59,10 @@ not yet confirmed on-device.
   the defender's `UNIT_DEFENCE` plus `TERRAIN_DEFENCE_BONUS` for the tile
   it's standing on, scaled by the attacker's current health% — but
   **without** the original's per-property matchup bonuses (mounted vs.
-  ground, golem vs. skeleton, water/swamp bonuses, etc.), which depend on
-  per-unit property flags this milestone doesn't read. A surviving
+  ground, golem vs. skeleton, water/swamp bonuses, etc.). These depend on
+  the same `UNIT_PROPERTIES` bit flags milestone 5 reads for capture
+  eligibility (below) -- the bits combat would need are just not
+  interpreted here; only the capture-related ones are. A surviving
   defender counterattacks if adjacent (`Unit.canPerformCloseAttack()`:
   melee-only, and only if the defender's own `MIN_ATTACK_RANGE` is 1 --
   the catapult, for example, can never counterattack). A unit at 0 health
@@ -72,6 +73,18 @@ not yet confirmed on-device.
 - **Still no AI** — both sides are driven by whoever is holding the
   device; porting the original's AI (a large scoring heuristic spanning
   much of `MainDisplayable.java`) is out of scope for this port so far.
+- Village/castle capture: moving a unit onto an enemy or neutral
+  fraction-building tile flips its ownership if that unit type is
+  equipped to capture it, per each `.unit` file's `HasProperty` bits
+  (`UNIT_PROPERTIES` in `main.cpp`) -- soldier and king can capture
+  villages, but **only the king can capture a castle**, matching the
+  source data (no other unit has that property bit set).
+- Win condition: a side loses when its king dies in combat. This is a
+  simplification of the original, which ties defeat more to castle
+  capture/`fractionKings` bookkeeping this milestone doesn't track --
+  king death is the clearest single condition to key off without it. The
+  screen shows a "BLUE/RED WINS" banner and further taps are ignored;
+  there's no restart, so you'll need to reset the board to play again.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
@@ -81,15 +94,14 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-Buildings/capture, victory/defeat conditions (a king can be reduced to 0
-health but nothing ends the game), the combat property bonuses noted
-above, an AI opponent, the HUD beyond the turn indicator and END TURN
-button, menus, MIDI music (needs its own synth — see the "Music" question
-this was scoped against), and every map past `m0`. The original
+A restart/rematch after a win, the combat property bonuses noted above,
+an AI opponent, the HUD beyond the turn indicator and END TURN button,
+menus, MIDI music (needs its own synth — see the "Music" question this
+was scoped against), and every map past `m0`. The original
 `MainDisplayable.java` is ~11,000 lines covering all of that; this
-milestone only reads its map-loading format, terrain layer, unit starting
-positions, and enough movement/combat rules for two people to pass a
-device back and forth.
+milestone reads its map-loading format, terrain layer, unit starting
+positions, and enough movement/combat/capture rules for two people to
+pass a device back and forth and finish a game.
 
 ## Build & flash
 
@@ -158,20 +170,20 @@ bad state.
 This was built and the asset converter was run and its output checked
 (header parses to the expected 12x12 map, m0's 6 unit records parse to
 plausible type/color/tile values, tile and unit-icon files are the
-expected size). The terrain-cost, unit-move-range, and combat-stat
-(offence/defence/attack-range) tables in `main.cpp` were cross-checked
-field-by-field against `tiles0.prop` and each `*.unit` file. **It has
-not been flashed to or run on physical hardware** — this session has no
-access to your board. Display/touch pins are confirmed; SD/MMC pins and
-WiFi/OTA are not — flash over USB first and report back what you see.
-The SD/MMC init, tile/unit rendering, tap-vs-drag detection (the
-`TAP_MOVE_THRESHOLD` in `main.cpp` is a guess), and OTA path are the
-things most likely to need a follow-up fix once you can see real output.
+expected size). The terrain-cost, unit-move-range, combat-stat
+(offence/defence/attack-range), and unit-property (`UNIT_PROPERTIES`)
+tables in `main.cpp` were cross-checked field-by-field against
+`tiles0.prop` and each `*.unit` file. **It has not been flashed to or
+run on physical hardware** — this session has no access to your board.
+Display/touch pins are confirmed; SD/MMC pins and WiFi/OTA are not —
+flash over USB first and report back what you see. The SD/MMC init,
+tile/unit rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in
+`main.cpp` is a guess), and OTA path are the things most likely to need
+a follow-up fix once you can see real output.
 
 ## Suggested next milestones
 
-1. Get milestone 4 actually rendering and responding to touch on your
-   hardware (terrain + units + movement + combat), fix pins/driver/
-   touch-threshold quirks that only show up on real silicon
-2. Buildings/capture and win/loss conditions for a single map
-3. Menus, HUD, remaining maps, an AI opponent, music
+1. Get milestone 5 actually rendering and responding to touch on your
+   hardware (terrain + units + movement + combat + capture), fix
+   pins/driver/touch-threshold quirks that only show up on real silicon
+2. Menus, HUD, remaining maps, an AI opponent, music
