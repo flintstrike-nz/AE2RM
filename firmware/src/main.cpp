@@ -422,18 +422,14 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
     return d >= UNIT_ATTACK_RANGE_MIN[attacker.type] && d <= UNIT_ATTACK_RANGE_MAX[attacker.type] && UNIT_ATTACK_RANGE_MAX[attacker.type] > 0;
 }
 
-// Resolves units[attackerIdx] attacking units[victimIdx], matching the
-// core of Unit.java's attackUnit(): a random roll in [offenceMin,
-// offenceMax) against the victim's defence (base + terrain bonus), scaled
-// by the attacker's current health%. Deliberately does NOT port the
-// original's per-property matchup bonuses (mounted-vs-ground,
-// golem-vs-skeleton, water/swamp bonuses, etc. -- see Unit.java's
-// getOffenceBonusAgainstUnit()); those depend on per-unit HasProperty
-// flags this milestone doesn't read.
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
 // victimIdx's defence (base + terrain bonus), scaled by the attacker's
 // current health%. Shared by attackUnit()'s direct hit and its
-// counterattack.
+// counterattack. Deliberately does NOT port the original's per-property
+// matchup bonuses (mounted-vs-ground, golem-vs-skeleton, water/swamp
+// bonuses, etc. -- see Unit.java's getOffenceBonusAgainstUnit()):
+// UNIT_PROPERTIES is read elsewhere for capture eligibility, but the
+// matchup-bonus bits it also carries aren't interpreted here.
 void resolveHit(int attackerIdx, int victimIdx)
 {
     UnitPlacement &attacker = units[attackerIdx];
