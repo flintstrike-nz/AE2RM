@@ -52,6 +52,8 @@ the full pinout and hardware details.
   defence, range, and movement
 - **A living-unit-count readout**: the HUD shows how many of each side's
   units are still alive, next to the turn indicator
+- **A RETRY button** on the win/loss banner: reload the same mission
+  right away instead of going back through the mission menu
 - **Real mission titles**, and **`m0`'s intro cutscene**: the original's
   localized string table (`lang.dat`) is now read for mission-menu
   labels and for actual English dialog text, and a small interpreter
@@ -113,6 +115,8 @@ history.
 13. [AI secures guaranteed kills](https://github.com/hayden-flintoft/AE2RM/pull/13)
     — attacks a target it can finish off regardless of the damage roll
     before falling back to the weakest-target rule
+14. [RETRY button](https://github.com/hayden-flintoft/AE2RM/pull/14) —
+    the win/loss banner can reload the same mission directly
 
 **Planned, not yet started (no fixed order):**
 

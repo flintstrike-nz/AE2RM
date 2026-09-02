@@ -1,4 +1,4 @@
-// AE2RM ESP32 port -- milestone 13: single-player vs. a basic AI, plus
+// AE2RM ESP32 port -- milestone 14: single-player vs. a basic AI, plus
 // m0's mission-script intro cutscene.
 //
 // Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
@@ -24,10 +24,12 @@
 // stands. Tap any other living unit (an enemy, or one that's already
 // moved) to see its stats instead. A side loses when
 // its king dies -- a simplification of the original's
-// castle-capture-tied defeat condition, see README -- and tapping the
-// win banner, or the always-available MENU button, returns to the
-// mission menu. Drag still pans the camera during a mission. See
-// firmware/README.md for what's implemented and what's next.
+// castle-capture-tied defeat condition, see README -- and the win banner
+// has a RETRY button that reloads the same mission directly; tapping
+// anywhere else on the banner, or the always-available MENU button,
+// returns to the mission menu. Drag still pans the camera during a
+// mission. See firmware/README.md for what's implemented and what's
+// next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -199,6 +201,12 @@ inline uint8_t setBuildingFraction(uint8_t tile, int fraction)
 
 static bool gameOver = false;
 static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
+
+// The mission startGame() most recently loaded (m<currentMapIndex>.aem),
+// or -1 before any mission has loaded. Only used by the win/loss banner's
+// RETRY button to reload the same mission without a trip through the
+// mission menu.
+static int currentMapIndex = -1;
 
 // Movement points remaining when the currently selected unit could reach
 // [x*mapHeight+y], or -1 if unreachable. Lazily allocated/resized to match
@@ -1043,6 +1051,7 @@ void startGame(int mapIndex)
         return;
     }
 
+    currentMapIndex = mapIndex;
     currentTurn = 0;
     selectedUnit = -1;
     infoUnit = -1;
@@ -1362,6 +1371,16 @@ constexpr int MENU_BTN_H = 16;
 constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;
 constexpr int MENU_BTN_Y = 2;
 
+// Win/loss banner geometry, and its RETRY button -- shared between
+// drawViewport() (drawing it) and handleTap() (hit-testing it), so both
+// use the same constants rather than each computing the layout itself.
+constexpr int BANNER_H = 20;
+constexpr int BANNER_Y = (DISPLAY_HEIGHT - BANNER_H) / 2;
+constexpr int RETRY_BTN_W = 70;
+constexpr int RETRY_BTN_H = 18;
+constexpr int RETRY_BTN_X = (DISPLAY_WIDTH - RETRY_BTN_W) / 2;
+constexpr int RETRY_BTN_Y = BANNER_Y + BANNER_H + 8;
+
 // If u just moved onto an enemy/neutral fraction building it's equipped to
 // capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
 // and king for villages, king only for castles), flips its ownership to u's
@@ -1407,9 +1426,13 @@ void handleTap(int screenX, int screenY)
 
     if (gameOver)
     {
-        // Any other tap while the win banner is up also returns to the
-        // menu -- there's no in-place rematch, just start a (possibly
-        // different) mission.
+        if (screenX >= RETRY_BTN_X && screenX < RETRY_BTN_X + RETRY_BTN_W &&
+            screenY >= RETRY_BTN_Y && screenY < RETRY_BTN_Y + RETRY_BTN_H)
+        {
+            startGame(currentMapIndex);
+            return;
+        }
+        // Any other tap while the win banner is up returns to the menu.
         appState = STATE_MENU;
         drawMenu();
         return;
@@ -1670,17 +1693,25 @@ void drawViewport()
 
     if (gameOver)
     {
-        constexpr int BANNER_H = 20;
-        int bannerY = (DISPLAY_HEIGHT - BANNER_H) / 2;
         uint16_t winColor = winnerColor == 0 ? TFT_BLUE : TFT_RED;
-        gfx.fillRect(0, bannerY, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
-        gfx.drawFastHLine(0, bannerY, DISPLAY_WIDTH, winColor);
-        gfx.drawFastHLine(0, bannerY + BANNER_H - 1, DISPLAY_WIDTH, winColor);
+        gfx.fillRect(0, BANNER_Y, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
+        gfx.drawFastHLine(0, BANNER_Y, DISPLAY_WIDTH, winColor);
+        gfx.drawFastHLine(0, BANNER_Y + BANNER_H - 1, DISPLAY_WIDTH, winColor);
         gfx.setTextSize(2);
         gfx.setTextColor(winColor, TFT_BLACK);
-        gfx.setCursor(30, bannerY + 4);
+        gfx.setCursor(30, BANNER_Y + 4);
         gfx.print(winnerColor == 0 ? "BLUE WINS" : "RED WINS");
         gfx.setTextSize(1);
+
+        // Retry the same mission without a trip through the menu -- tap
+        // anywhere else on the banner still returns to the mission menu
+        // (handleTap()'s existing gameOver behavior), this is just a
+        // faster path back into the mission you just finished.
+        gfx.fillRect(RETRY_BTN_X, RETRY_BTN_Y, RETRY_BTN_W, RETRY_BTN_H, TFT_DARKGREY);
+        gfx.drawRect(RETRY_BTN_X, RETRY_BTN_Y, RETRY_BTN_W, RETRY_BTN_H, TFT_WHITE);
+        gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+        gfx.setCursor(RETRY_BTN_X + 10, RETRY_BTN_Y + 5);
+        gfx.print("RETRY");
     }
 
     gfx.endWrite();
