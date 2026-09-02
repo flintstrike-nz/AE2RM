@@ -48,6 +48,15 @@ the full pinout and hardware details.
 - **A unit stat panel**: tap any unit you can't currently act with — an
   enemy, or one that's already moved — to see its type, HP, attack,
   defence, range, and movement
+- **Real mission titles**, and **`m0`'s intro cutscene**: the original's
+  localized string table (`lang.dat`) is now read for mission-menu
+  labels and for actual English dialog text, and a small interpreter
+  runs the opening scene of `m0.script` — the only mission-script file
+  in the source archive — repositioning units, removing one scripted
+  casualty, panning the camera, and showing real story dialog before
+  handing control to the player. Only the intro (`@Case 0`-`13`); the
+  rest of the script (tutorial hints and an ending dialog, both gated on
+  live game state) isn't ported yet
 - **OTA firmware updates** over WiFi, after an initial USB flash
 
 ### What's not there yet
@@ -55,14 +64,13 @@ the full pinout and hardware details.
 An AI on par with the original; two of the eight story maps (`m4`, `m6`)
 start with zero enemy units in their map data and so can't reach the
 win condition at all in single-player yet — the reason isn't fully
-known (the source archive this port builds from has no mission-script
-file for any map except `m0`, so it's not that a script for these two
-specifically is missing and unported; it applies equally to `m1`,
-`m2`, `m3`, `m5`, `m7`, which do work). Also missing: in-game menus
-beyond mission select, and MIDI music (the original's music format
-needs its own synthesizer — there's no audio subsystem yet). See
-[`firmware/README.md`](firmware/README.md) for the full list and the
-reasoning behind each scoping decision.
+known (only `m0` has a mission-script file at all, and its rest — the
+part that could conceivably explain this — isn't ported yet either; it
+applies equally to `m1`, `m2`, `m3`, `m5`, `m7`, which do work with no
+script). Also missing: in-game menus beyond mission select, and MIDI
+music (the original's music format needs its own synthesizer — there's
+no audio subsystem yet). See [`firmware/README.md`](firmware/README.md)
+for the full list and the reasoning behind each scoping decision.
 
 ### Roadmap
 
@@ -90,17 +98,20 @@ history.
    weakest-target prioritization and low-health retreat
 9. [Unit stat panel](https://github.com/hayden-flintoft/AE2RM/pull/9) —
    tap any unit you can't act with to see its stats
+10. [Mission-script interpreter, part 1](https://github.com/hayden-flintoft/AE2RM/pull/10)
+    — real mission titles, `m0`'s intro cutscene with actual dialog text
 
 **Planned, not yet started (no fixed order):**
 
 - Get milestone 7 actually running on the physical board and fix
   whatever real hardware reveals — pins, touch feel, timing, AI behavior
   you can actually watch
-- Port `m0`'s mission-script interpreter (the only `.script` file in
-  the source archive; a real cutscene/dialog language -- camera moves,
-  `ShowDialog`, unit spawning/removal, etc.) and investigate whether
-  `m4`/`m6`'s missing red units are recoverable some other way, since
-  no script exists to explain it
+- The rest of `m0`'s mission-script (`@Case 14` onward — tutorial hints
+  and an ending dialog, both gated on live game state, needing a real
+  per-frame condition-evaluating state machine the milestone 10 intro
+  didn't need) and investigate whether `m4`/`m6`'s missing red units are
+  recoverable some other way, since neither is explained by the intro
+  cutscene alone
 - MIDI music via a small on-device synthesizer
 - Further AI work (defensive positioning, unit-coordination, closer to
   the original's scoring heuristic)

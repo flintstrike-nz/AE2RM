@@ -1,11 +1,14 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 7**:
+not an automatic conversion — there's no JVM here. This is **milestone 10**:
 terrain, units, movement, combat, capture, and the mission menu
-(milestones 1-6), plus a basic AI opponent — you're always blue, the
-computer is always red, so this is now playable single-player. No other
-menus, no scripted mission events.
+(milestones 1-6), an AI opponent (milestones 7-8) — you're always blue, the
+computer is always red, so this is playable single-player — a tap-to-inspect
+unit stat panel (milestone 9), and now `m0`'s intro cutscene, the first
+piece of the original's scripted mission events to be ported (milestone 10;
+see "Mission-script interpreter" below for exactly how much of the format
+that covers).
 
 ## Target hardware
 
@@ -132,19 +135,60 @@ not yet confirmed on-device.
   as before -- the two interactions don't conflict since a unit is never
   both at once. No portrait, no per-unit ability text, no equivalent to
   the original's fuller unit-info screen.
-- Mission menu: boots to a list of "Mission 1"-"Mission 8" (`m0.aem`
-  through `m7.aem`) instead of loading `m0` directly. Labels are generic
-  -- the original's mission titles come from a localized string table
-  this firmware doesn't read. Tapping a row loads that map and resets all
-  per-game state (turn, selection, win/loss, camera position); the tile
-  and unit-icon asset caches are content-independent across maps and are
-  deliberately not reset. The win banner's tap-to-continue returns here --
-  and so does a dedicated **MENU** button, always available during a
-  mission regardless of game state. That button isn't optional polish:
-  `m4`/`m6` place no red units in their map data (see above), so those
-  two missions can never trigger the king-death win condition --
-  without an unconditional way out, playing one would permanently strand
-  you in STATE_PLAYING.
+- Mission menu: boots to a list of `m0.aem` through `m7.aem`'s real
+  titles ("TEMPLE RAIDERS", "TO THE RESCUE", etc. -- locale string
+  indices 121-128, `getSaveInfoString()`'s label in the original, close
+  enough to a menu title to reuse -- see "Mission-script interpreter"
+  below for where these strings come from) instead of the generic
+  "Mission N" labels earlier milestones showed; a missing/failed-to-load
+  `strings.dat` falls back to those generic labels rather than an empty
+  row. Tapping a row loads that map and resets all per-game state (turn,
+  selection, win/loss, camera position); the tile and unit-icon asset
+  caches are content-independent across maps and are deliberately not
+  reset. The win banner's tap-to-continue returns here -- and so does a
+  dedicated **MENU** button, always available during a mission regardless
+  of game state. That button isn't optional polish: `m4`/`m6` place no
+  red units in their map data (see above), so those two missions can
+  never trigger the king-death win condition -- without an unconditional
+  way out, playing one would permanently strand you in STATE_PLAYING.
+- Mission-script interpreter (`runIntroScript()` in `main.cpp`, new this
+  milestone): `m0.script` is the only mission-script file in the source
+  archive (a real cutscene/dialog language -- `MainDisplayable.java`
+  interprets ~35 `@Case` blocks of it across the whole mission, gated on
+  live game-state `Test`s like `CurrentTurn`/`CountUnits`/`GameState`,
+  ending in tutorial `ShowHelp` overlays and a `CompleteMission` epilogue).
+  This milestone ports only its intro cutscene (`@Case 0`-`13`, ending at
+  `StartPlay`) as a one-shot linear pass run once at mission start, not a
+  per-frame state machine -- the remaining cases need one (to evaluate
+  `Test`s against ongoing play) and are explicitly not attempted here.
+  What the intro does: repositions three of `m0`'s starting units to
+  where the story leaves them post-cutscene (`GetUnitPlotRoute`, teleport
+  instead of the original's animated walk), removes one scripted casualty
+  (`GetUnit`+`RemoveUnit` -- a blue soldier dies before the player's
+  forces arrive), pans the camera to specific tiles or a side's king
+  (`MoveMapAndCursor`, a jump cut instead of a smooth pan), and shows four
+  real dialog lines with the original's actual English text
+  (`ShowDialog`, looked up from `/strings.dat` -- see below -- rendered
+  in a bottom text box, blocking on a tap to continue). Every other
+  command in that case range (`ShowMapName`, `NextState`,
+  `SetFadeEnabled`/`SetFadeValue`, `SetCursorVisible`, `SetMapStepMax`/
+  `SetUnitSpeed`, `Vibrate`, `ScheduleUnitAnimationStop`,
+  `CreateSpriteAtUnit`, `StartPlay`) has no equivalent in this port (no
+  fade/cursor-sprite/particle system, no per-tile movement animation to
+  pace) and is silently skipped, not simulated. Getting the
+  `GetUnitPlotRoute` argument order right (`x y color destX destY
+  animate`, not `color x y destX destY` -- easy to guess wrong from the
+  script's own bare integers) was verified by checking it against
+  `m0.aem`'s actual unit starting positions before shipping, not just
+  against the Java source reading order.
+- `/strings.dat`: the original's localized string table
+  (`PaintableObject.getLocaleString()`), copied byte-for-byte from
+  `src/java/res/lang.dat` by `convert_assets.py` -- same on-disk format
+  (int32 BE count, then that many uint16-BE-length-prefixed UTF-8
+  strings), loaded once at boot (`loadStrings()`) into a single PSRAM
+  buffer. Currently used for mission titles and `m0`'s dialog text only;
+  the table has ~300 more strings (menu labels, unit names, etc.) this
+  milestone doesn't read.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
@@ -154,22 +198,23 @@ not yet confirmed on-device.
 
 ## What's not implemented yet
 
-`m0`'s mission-script interpreter (a real cutscene/dialog language --
-camera moves, `ShowDialog`, unit spawning/removal, etc. -- present as a
-`.script` file for `m0` only in the source archive; not what's causing
-`m4`/`m6`'s missing red units, see above), the
-original's actual AI (this milestone's is a simple heuristic -- see
-above), the combat property bonuses noted above, any HUD beyond the turn
-indicator/END TURN/MENU buttons/mission menu/unit stat panel, MIDI music (needs its own
-synth — see the "Music" question this was scoped against), and skirmish
-maps (`s0`-`s11`, which would also need a 4-side, non-hardcoded turn
-queue -- see the team-color note above). The original
-`MainDisplayable.java` is ~11,000 lines covering all of that; this
-milestone reads its map-loading format, terrain layer, unit starting
-positions, and enough movement/combat/capture rules for a single-player
-skirmish against a basic AI, playable to a conclusion on the 6 story
-maps that start with red units to fight (`m4` and `m6` don't -- see
-above -- so those two can't yet reach the win condition).
+The rest of `m0`'s mission-script (`@Case 14` onward -- the Test-gated
+tutorial `ShowHelp` overlays checked against live game state, and the
+`CompleteMission` epilogue dialog; not what's causing `m4`/`m6`'s missing
+red units, see above), the original's actual AI (this milestone's is a
+simple heuristic -- see above), the combat property bonuses noted above,
+any HUD beyond the turn indicator/END TURN/MENU buttons/mission
+menu/unit stat panel/dialog box, MIDI music (needs its own synth — see
+the "Music" question this was scoped against), and skirmish maps
+(`s0`-`s11`, which would also need a 4-side, non-hardcoded turn queue --
+see the team-color note above). The original `MainDisplayable.java` is
+~11,000 lines covering all of that; this milestone reads its map-loading
+format, terrain layer, unit starting positions, enough movement/combat/
+capture rules for a single-player skirmish against a basic AI, real
+mission titles and `m0`'s intro cutscene, and is playable to a
+conclusion on the 6 story maps that start with red units to fight (`m4`
+and `m6` don't -- see above -- so those two can't yet reach the win
+condition).
 
 ## Build & flash
 
@@ -259,6 +304,14 @@ through to `hasMoved = true` without a move). The SD/MMC init, tile/unit
 rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp`
 is a guess), menu tap hit-testing, and OTA path are the other things
 most likely to need a follow-up fix once you can see real output.
+`m0`'s intro cutscene is additionally unverified in two ways specific to
+it: `strings.dat`'s parse (header count, length-prefixed reads) was only
+checked by inspecting the Python asset converter's copy of `lang.dat`
+and reasoning through the format, not by running the firmware's own
+reader; and the `GetUnitPlotRoute`/`MoveMapAndCursor`/`GetUnit` argument
+order was checked against `m0.aem`'s actual starting unit positions with
+a one-off script, not exercised on-device (see the "Mission-script
+interpreter" bullet above for what that check found).
 
 ## Suggested next milestones
 
@@ -266,4 +319,7 @@ most likely to need a follow-up fix once you can see real output.
    hardware (mission menu + terrain + units + movement + combat +
    capture + AI), fix pins/driver/touch-threshold/AI-behavior quirks
    that only show up on real silicon
-2. `m0`'s mission-script interpreter, music
+2. The rest of `m0`'s mission-script (tutorial `ShowHelp` overlays and
+   the ending dialog -- needs a real per-frame `Test`-evaluating state
+   machine, not the one-shot linear pass milestone 10 uses for the
+   intro), music

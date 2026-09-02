@@ -33,6 +33,20 @@ Output layout on the SD card:
                                 table and a list of unit placement records
                                 the firmware also parses (see main.cpp's
                                 loadMap()).
+    /strings.dat               -- copied as-is from src/java/res/lang.dat
+                                (int32 BE count, then that many uint16
+                                BE-length-prefixed UTF-8 strings -- the
+                                original's PaintableObject.getLocaleString()
+                                table). Used for mission menu titles and
+                                m0's mission-script dialog text.
+    /scripts/m0.script          -- copied as-is; the only mission-script
+                                file in the source archive (see the root
+                                README's roadmap). A small subset of its
+                                commands (the intro cutscene, @Case 0-13)
+                                is interpreted by main.cpp's
+                                runIntroScript(); the rest (Test-driven
+                                tutorial hints and the ending dialog,
+                                @Case 14 onward) isn't ported yet.
 """
 import os
 import shutil
@@ -46,6 +60,7 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 RES_DIR = os.path.normpath(os.path.join(HERE, "..", "..", "src", "java", "res", "res"))
+LANG_PATH = os.path.normpath(os.path.join(RES_DIR, "..", "lang.dat"))
 OUT_DIR = os.path.join(HERE, "..", "assets", "sdcard")
 
 TILE_COUNT = 48  # tiles0.sprite: FrameCount 48, FrameWidth/Height 24
@@ -129,6 +144,30 @@ def main():
         name = f"m{i}.aem"
         shutil.copyfile(os.path.join(RES_DIR, name), os.path.join(maps_out, name))
         print(f"copied {name}")
+
+    # lang.dat's on-disk format (int32 BE count, then that many
+    # DataOutputStream.writeUTF-style entries: uint16 BE length + UTF-8
+    # bytes) is exactly what the firmware's own reader expects -- copy it
+    # unmodified rather than reprocessing it. Used for m0's mission-script
+    # dialog text (PaintableObject.getLocaleString()) and the mission
+    # menu's titles (indices 121-128, one per m0.aem..m7.aem -- see
+    # MainDisplayable.java's `getLocaleString(121 + mission)`).
+    if os.path.isfile(LANG_PATH):
+        shutil.copyfile(LANG_PATH, os.path.join(OUT_DIR, "strings.dat"))
+        print("copied lang.dat -> strings.dat")
+    else:
+        print(f"WARNING: {LANG_PATH} not found -- skipping strings.dat "
+              "(mission menu falls back to generic titles, m0's intro "
+              "cutscene won't have dialog text)")
+
+    scripts_out = os.path.join(OUT_DIR, "scripts")
+    os.makedirs(scripts_out, exist_ok=True)
+    # Only m0 has a mission-script file in the source archive (see the root
+    # README's roadmap) -- the firmware only looks for m0.script.
+    m0_script = os.path.join(RES_DIR, "m0.script")
+    if os.path.isfile(m0_script):
+        shutil.copyfile(m0_script, os.path.join(scripts_out, "m0.script"))
+        print("copied m0.script")
 
     print(f"\nDone. Copy the contents of {OUT_DIR} onto the microSD card root.")
 
