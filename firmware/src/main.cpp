@@ -668,9 +668,15 @@ constexpr int HUD_BTN_H = 22;
 constexpr int HUD_BTN_X = DISPLAY_WIDTH - HUD_BTN_W - 4;
 constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
 
-// Handles a tap (as opposed to a drag-to-pan) at the given screen
-// coordinates: the END TURN button, selecting a movable unit belonging to
-// the current turn, or moving the selected unit to a reachable tile.
+// Always-available way back to the mission menu, independent of gameOver.
+// Without this, a mission whose win condition can never trigger (m4/m6
+// place no red units, and their scripted spawns aren't ported -- see
+// README) would trap the player in STATE_PLAYING with no way out.
+constexpr int MENU_BTN_W = 50;
+constexpr int MENU_BTN_H = 16;
+constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;
+constexpr int MENU_BTN_Y = 2;
+
 // If u just moved onto an enemy/neutral fraction building it's equipped to
 // capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
 // and king for villages, king only for castles), flips its ownership to u's
@@ -698,12 +704,24 @@ void tryCaptureBuilding(const UnitPlacement &u)
     Serial.printf("unit captured %s at (%d,%d) for color %d\n", isCastle ? "castle" : "village", u.tileX, u.tileY, u.color);
 }
 
+// Handles a tap (as opposed to a drag-to-pan) at the given screen
+// coordinates: the MENU button, the END TURN button, selecting a movable
+// unit belonging to the current turn, or moving/attacking with it.
 void handleTap(int screenX, int screenY)
 {
+    if (screenX >= MENU_BTN_X && screenX < MENU_BTN_X + MENU_BTN_W &&
+        screenY >= MENU_BTN_Y && screenY < MENU_BTN_Y + MENU_BTN_H)
+    {
+        appState = STATE_MENU;
+        drawMenu();
+        return;
+    }
+
     if (gameOver)
     {
-        // Any tap on the win banner returns to the mission menu -- there's
-        // no in-place rematch, just start a (possibly different) mission.
+        // Any other tap while the win banner is up also returns to the
+        // menu -- there's no in-place rematch, just start a (possibly
+        // different) mission.
         appState = STATE_MENU;
         drawMenu();
         return;
@@ -867,6 +885,12 @@ void drawViewport()
     gfx.setTextSize(1);
     gfx.setCursor(2, 4);
     gfx.print(currentTurn == 0 ? "BLUE TURN" : "RED TURN");
+
+    gfx.fillRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_DARKGREY);
+    gfx.drawRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_WHITE);
+    gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+    gfx.setCursor(MENU_BTN_X + 6, MENU_BTN_Y + 4);
+    gfx.print("MENU");
 
     gfx.fillRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_DARKGREY);
     gfx.drawRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_WHITE);

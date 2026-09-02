@@ -95,7 +95,13 @@ not yet confirmed on-device.
   this firmware doesn't read. Tapping a row loads that map and resets all
   per-game state (turn, selection, win/loss, camera position); the tile
   and unit-icon asset caches are content-independent across maps and are
-  deliberately not reset. The win banner's tap-to-continue returns here.
+  deliberately not reset. The win banner's tap-to-continue returns here --
+  and so does a dedicated **MENU** button, always available during a
+  mission regardless of game state. That button isn't optional polish:
+  `m4`/`m6` place no red units and their scripted spawns aren't ported,
+  so those two missions can never trigger the king-death win condition --
+  without an unconditional way out, playing one would permanently strand
+  you in STATE_PLAYING.
 - Asset frame caches (tiles + unit icons) live in PSRAM via `ps_malloc()`,
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
