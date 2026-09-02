@@ -123,6 +123,15 @@ not yet confirmed on-device.
   king death is the clearest single condition to key off without it. The
   screen shows a "BLUE/RED WINS" banner; tapping it returns to the
   mission menu (see below) rather than restarting in place.
+- Unit stat panel: tapping any living unit that *isn't* selectable this
+  turn (an enemy, or a friendly unit that's already moved) shows a small
+  bottom-left panel with its type, current HP, attack/defence, attack
+  range, and move range (`infoUnit` in `main.cpp`) instead of doing
+  nothing. Tapping empty ground, or the MENU/END TURN buttons, dismisses
+  it; tapping a unit that *is* selectable still selects it for movement
+  as before -- the two interactions don't conflict since a unit is never
+  both at once. No portrait, no per-unit ability text, no equivalent to
+  the original's fuller unit-info screen.
 - Mission menu: boots to a list of "Mission 1"-"Mission 8" (`m0.aem`
   through `m7.aem`) instead of loading `m0` directly. Labels are generic
   -- the original's mission titles come from a localized string table
@@ -151,7 +160,7 @@ camera moves, `ShowDialog`, unit spawning/removal, etc. -- present as a
 `m4`/`m6`'s missing red units, see above), the
 original's actual AI (this milestone's is a simple heuristic -- see
 above), the combat property bonuses noted above, any HUD beyond the turn
-indicator/END TURN/MENU buttons/mission menu, MIDI music (needs its own
+indicator/END TURN/MENU buttons/mission menu/unit stat panel, MIDI music (needs its own
 synth — see the "Music" question this was scoped against), and skirmish
 maps (`s0`-`s11`, which would also need a 4-side, non-hardcoded turn
 queue -- see the team-color note above). The original
@@ -257,4 +266,4 @@ most likely to need a follow-up fix once you can see real output.
    hardware (mission menu + terrain + units + movement + combat +
    capture + AI), fix pins/driver/touch-threshold/AI-behavior quirks
    that only show up on real silicon
-2. `m0`'s mission-script interpreter, music, a smarter AI
+2. `m0`'s mission-script interpreter, music

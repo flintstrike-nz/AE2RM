@@ -144,6 +144,12 @@ static const uint8_t UNIT_DEFENCE[UNIT_TYPE_COUNT] = {5, 5, 10, 5, 10, 15, 30, 1
 static const uint8_t UNIT_ATTACK_RANGE_MAX[UNIT_TYPE_COUNT] = {1, 2, 1, 1, 1, 1, 1, 4, 1, 1, 1, 0};
 static const uint8_t UNIT_ATTACK_RANGE_MIN[UNIT_TYPE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0};
 
+// Same UNIT_TYPE_COUNT order as above, for the tap-to-inspect stat panel.
+static const char *const UNIT_TYPE_NAMES[UNIT_TYPE_COUNT] = {
+    "SOLDIER", "ARCHER", "LIZARD", "WIZARD", "WISP", "SPIDER",
+    "GOLEM", "CATAPULT", "WYVERN", "KING", "SKELETON", "CRYSTAL",
+};
+
 // Bit flags from each unit's "HasProperty N" lines (UNIT_PROPERTIES[i] =
 // OR of 1<<N for each line). Only the two capture-related bits are used by
 // this milestone: bit 3 (0x08, "can capture a village") is soldier and
@@ -192,6 +198,14 @@ static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
 // each time a unit is selected.
 static int8_t *reachableCost = nullptr;
 static int selectedUnit = -1; // index into units[], or -1 if none selected
+
+// A unit whose stat panel is showing, or -1 if none. Distinct from
+// selectedUnit: tapping *any* living unit -- an enemy, or one that's
+// already moved this turn -- shows its stats without starting a move,
+// while selectedUnit only ever holds a unit the current player can still
+// act with. Cleared by tapping empty ground, the MENU/END TURN buttons,
+// or selecting a movable unit.
+static int infoUnit = -1;
 
 // 0 or 1, matching UnitPlacement::color directly (see the comment on that
 // struct). Color 1 is always AI-controlled (see AI_COLOR below) -- there
@@ -638,6 +652,7 @@ void startGame(int mapIndex)
 
     currentTurn = 0;
     selectedUnit = -1;
+    infoUnit = -1;
     gameOver = false;
     winnerColor = -1;
     viewX = 0;
@@ -926,12 +941,15 @@ void tryCaptureBuilding(const UnitPlacement &u)
 
 // Handles a tap (as opposed to a drag-to-pan) at the given screen
 // coordinates: the MENU button, the END TURN button, selecting a movable
-// unit belonging to the current turn, or moving/attacking with it.
+// unit belonging to the current turn (or moving/attacking with it once
+// selected), or -- for any other living unit, friend or foe -- showing
+// its stat panel (infoUnit) without starting a move.
 void handleTap(int screenX, int screenY)
 {
     if (screenX >= MENU_BTN_X && screenX < MENU_BTN_X + MENU_BTN_W &&
         screenY >= MENU_BTN_Y && screenY < MENU_BTN_Y + MENU_BTN_H)
     {
+        infoUnit = -1;
         appState = STATE_MENU;
         drawMenu();
         return;
@@ -950,6 +968,7 @@ void handleTap(int screenX, int screenY)
     if (screenX >= HUD_BTN_X && screenX < HUD_BTN_X + HUD_BTN_W &&
         screenY >= HUD_BTN_Y && screenY < HUD_BTN_Y + HUD_BTN_H)
     {
+        infoUnit = -1;
         endTurn();
         return;
     }
@@ -957,7 +976,14 @@ void handleTap(int screenX, int screenY)
     int mx = (screenX + viewX) / TILE_SIZE;
     int my = (screenY + viewY) / TILE_SIZE;
     if (!inMapBounds(mx, my))
+    {
+        if (infoUnit >= 0)
+        {
+            infoUnit = -1;
+            drawViewport();
+        }
         return;
+    }
 
     if (selectedUnit >= 0)
     {
@@ -983,6 +1009,15 @@ void handleTap(int screenX, int screenY)
             units[selectedUnit].hasMoved = true;
             tryCaptureBuilding(units[selectedUnit]);
         }
+        else if (targetIdx >= 0)
+        {
+            // Tapped a unit that wasn't a valid attack target from here (out
+            // of range, or on the current player's own side) -- deselecting
+            // silently would make tap-to-inspect need a second tap on any
+            // unit tapped while another was already selected. Show its
+            // panel instead, same as tapping it with nothing selected would.
+            infoUnit = targetIdx;
+        }
         selectedUnit = -1;
         drawViewport();
         return;
@@ -991,8 +1026,18 @@ void handleTap(int screenX, int screenY)
     int idx = unitIndexAt(mx, my);
     if (idx >= 0 && units[idx].color == currentTurn && !units[idx].hasMoved)
     {
+        infoUnit = -1;
         selectedUnit = idx;
         computeReachable(units[idx]);
+        drawViewport();
+    }
+    else if (idx != infoUnit)
+    {
+        // Any other living unit -- an enemy, or a friendly unit that's
+        // already moved this turn -- can't be selected to act with, but
+        // tapping it (or empty ground, idx == -1, to dismiss) shows/hides
+        // its stat panel instead of doing nothing.
+        infoUnit = idx;
         drawViewport();
     }
 }
@@ -1121,6 +1166,31 @@ void drawViewport()
     gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
     gfx.setCursor(HUD_BTN_X + 6, HUD_BTN_Y + 7);
     gfx.print("END TURN");
+
+    // Tap-to-inspect stat panel (see infoUnit's comment) -- bottom-left,
+    // clear of the END TURN button on the bottom-right. A unit that died
+    // or otherwise vanished since the tap (e.g. an AI turn ran) just stops
+    // showing rather than reading stale/invalid data.
+    if (infoUnit >= 0 && (infoUnit >= unitCount || !units[infoUnit].alive))
+        infoUnit = -1;
+    if (infoUnit >= 0)
+    {
+        const UnitPlacement &iu = units[infoUnit];
+        constexpr int PANEL_W = HUD_BTN_X - 8;
+        constexpr int PANEL_H = 40;
+        constexpr int PANEL_X = 4;
+        constexpr int PANEL_Y = DISPLAY_HEIGHT - PANEL_H - 4;
+        uint16_t ownerColor = iu.color == 0 ? TFT_BLUE : TFT_RED;
+        gfx.fillRect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, TFT_BLACK);
+        gfx.drawRect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, ownerColor);
+        gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+        gfx.setCursor(PANEL_X + 4, PANEL_Y + 3);
+        gfx.printf("%s HP %d", UNIT_TYPE_NAMES[iu.type], iu.health);
+        gfx.setCursor(PANEL_X + 4, PANEL_Y + 13);
+        gfx.printf("ATK %d-%d DEF %d", UNIT_OFFENCE_MIN[iu.type], UNIT_OFFENCE_MAX[iu.type], UNIT_DEFENCE[iu.type]);
+        gfx.setCursor(PANEL_X + 4, PANEL_Y + 23);
+        gfx.printf("RANGE %d-%d MOVE %d", UNIT_ATTACK_RANGE_MIN[iu.type], UNIT_ATTACK_RANGE_MAX[iu.type], UNIT_MOVE_RANGE[iu.type]);
+    }
 
     if (gameOver)
     {

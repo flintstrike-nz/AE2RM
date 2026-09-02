@@ -41,9 +41,13 @@ the full pinout and hardware details.
 - **Capture**: villages and castles change ownership when the right unit
   type moves onto them, matching the original's capture-eligibility
   rules exactly
-- **A basic AI opponent**: you play blue, the computer plays red — this
-  makes the game genuinely single-player, though the AI is a simple
-  heuristic, not a port of the original's scoring-based AI
+- **An AI opponent**: you play blue, the computer plays red — this makes
+  the game genuinely single-player. It targets the weakest in-range
+  enemy and retreats when critically low on health, but it's still a
+  simple heuristic, not a port of the original's scoring-based AI
+- **A unit stat panel**: tap any unit you can't currently act with — an
+  enemy, or one that's already moved — to see its type, HP, attack,
+  defence, range, and movement
 - **OTA firmware updates** over WiFi, after an initial USB flash
 
 ### What's not there yet
@@ -82,6 +86,10 @@ history.
    8 story maps selectable, an unconditional way back to the menu
 7. [Basic AI opponent](https://github.com/hayden-flintoft/AE2RM/pull/7)
    — single-player vs. a simple heuristic AI
+8. [Smarter AI](https://github.com/hayden-flintoft/AE2RM/pull/8) —
+   weakest-target prioritization and low-health retreat
+9. [Unit stat panel](https://github.com/hayden-flintoft/AE2RM/pull/9) —
+   tap any unit you can't act with to see its stats
 
 **Planned, not yet started (no fixed order):**
 
@@ -94,9 +102,10 @@ history.
   `m4`/`m6`'s missing red units are recoverable some other way, since
   no script exists to explain it
 - MIDI music via a small on-device synthesizer
-- A stronger AI (target prioritization, defensive positioning, closer
-  to the original's scoring heuristic)
-- In-game menus/HUD beyond mission select (settings, unit info, etc.)
+- Further AI work (defensive positioning, unit-coordination, closer to
+  the original's scoring heuristic)
+- More in-game HUD beyond mission select and the unit stat panel
+  (settings, etc.)
 - Skirmish maps (`s0`-`s11`), which need a real building-derived,
   4-side turn queue instead of the hardcoded 2-side one story maps use
 
