@@ -669,20 +669,27 @@ void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the A
 // the two-human hotseat mode earlier milestones had no longer applies.
 constexpr int AI_COLOR = 1;
 
-// Returns the index of the first living enemy of `color` that a unit of
-// `type` standing at (fromX,fromY) could attack, or -1. "First" in
-// units[] array order, not by any notion of best target -- this AI does
-// not prioritize targets (weakest, most valuable, etc.), unlike the
-// original's scoring heuristic (sub_10cb() and friends in
-// MainDisplayable.java, which this milestone does not port).
+// Returns the index of the lowest-health living enemy of `color` that a
+// unit of `type` standing at (fromX,fromY) could attack, or -1 if none
+// are in range. "Weakest by current health" is the one prioritization
+// this AI does -- it's not the original's scoring heuristic (sub_10cb()
+// and friends in MainDisplayable.java, which weighs many more factors
+// and isn't ported), just a cheap, obviously-better-than-arbitrary rule:
+// finishing off a damaged unit removes it from the board for good,
+// whereas splitting damage across several full-health enemies doesn't.
 int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 {
+    int best = -1;
     for (int i = 0; i < unitCount; ++i)
     {
-        if (units[i].alive && units[i].color != color && inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
-            return i;
+        if (!units[i].alive || units[i].color == color)
+            continue;
+        if (!inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
+            continue;
+        if (best < 0 || units[i].health < units[best].health)
+            best = i;
     }
-    return -1;
+    return best;
 }
 
 // A deliberately simple AI move for one unit, evaluated in this priority:
@@ -690,14 +697,25 @@ int findAttackTarget(uint8_t type, int color, int fromX, int fromY)
 //   2. Otherwise, if some reachable tile puts an enemy in range, move
 //      there and attack (this AI is allowed the original's "move then
 //      attack" -- see the note on handleTap() for why human play doesn't
-//      get that).
-//   3. Otherwise, move toward the nearest living enemy (by post-move
+//      get that). Every reachable attack-capable tile is checked, not just
+//      the first found, and the one whose target has the lowest health
+//      wins -- so this path shares findAttackTarget()'s weakest-first rule
+//      instead of taking whatever attack the scan order turns up first.
+//   3. Otherwise, if this unit's health is critically low (<=25), move to
+//      whichever reachable tile MAXIMIZES its distance to the CLOSEST
+//      living enemy (checked against every enemy, not just the one
+//      nearest before moving -- with enemies on multiple sides, only that
+//      minimum says how exposed a tile actually leaves the unit) --
+//      crude self-preservation, not real defensive positioning (no
+//      cover/terrain-bonus awareness, no regard for whether retreating
+//      abandons an objective).
+//   4. Otherwise, move toward the nearest living enemy (by post-move
 //      distance) among reachable tiles, to close the gap for a future
 //      turn.
-//   4. If no enemies remain, do nothing.
-// No pathfinding beyond computeReachable()'s flood fill, no retreat/
-// defensive positioning, no target prioritization, no coordination
-// between units. This is enough to make single-player winnable and
+//   5. If no enemies remain, do nothing.
+// No pathfinding beyond computeReachable()'s flood fill, no coordination
+// between units, no target prioritization beyond findAttackTarget()'s
+// weakest-first rule. This is enough to make single-player winnable and
 // losable, not a port of the original's AI.
 void aiActUnit(int idx)
 {
@@ -736,9 +754,20 @@ void aiActUnit(int idx)
         return;
     }
 
-    int moveToX = -1, moveToY = -1, bestApproachDist = nearestDist;
-    bool foundAttackTile = false;
-    for (int x = 0; x < mapWidth && !foundAttackTile; ++x)
+    constexpr int RETREAT_HEALTH_THRESHOLD = 25;
+    bool retreating = u.health <= RETREAT_HEALTH_THRESHOLD;
+
+    // A full scan, not a first-match: an attack-capable tile found early in
+    // x/y order must not win over a later one that reaches a weaker target,
+    // and (for retreat) distance-to-the-single-nearest-enemy isn't a safe
+    // score once there's more than one enemy on the board -- maximizing it
+    // can walk the unit straight at a different enemy. So every reachable
+    // tile is scored fully before moveToX/Y is committed below.
+    int moveToX = -1, moveToY = -1;
+    int bestApproachDist = nearestDist;  // used only when !retreating
+    int bestRetreatMinDist = -1;         // used only when retreating
+    int attackTileX = -1, attackTileY = -1, attackTargetHealth = INT32_MAX;
+    for (int x = 0; x < mapWidth; ++x)
     {
         for (int y = 0; y < mapHeight; ++y)
         {
@@ -746,21 +775,59 @@ void aiActUnit(int idx)
                 continue;
             if (unitIndexAt(x, y) >= 0 && !(x == u.tileX && y == u.tileY))
                 continue;
-            if (findAttackTarget(u.type, u.color, x, y) >= 0)
+
+            int tileTarget = findAttackTarget(u.type, u.color, x, y);
+            if (tileTarget >= 0)
             {
-                moveToX = x;
-                moveToY = y;
-                foundAttackTile = true;
-                break;
+                if (attackTileX < 0 || units[tileTarget].health < attackTargetHealth)
+                {
+                    attackTileX = x;
+                    attackTileY = y;
+                    attackTargetHealth = units[tileTarget].health;
+                }
+                continue; // an attack-capable tile never competes with approach/retreat
             }
-            int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
-            if (d < bestApproachDist)
+
+            if (retreating)
             {
-                bestApproachDist = d;
-                moveToX = x;
-                moveToY = y;
+                // Distance to the CLOSEST living enemy from this tile, not
+                // just to whichever enemy was nearest before moving -- with
+                // enemies on multiple sides, only the minimum across all of
+                // them tells you how exposed this tile actually leaves the
+                // unit.
+                int minDist = INT32_MAX;
+                for (int i = 0; i < unitCount; ++i)
+                {
+                    if (!units[i].alive || units[i].color == u.color)
+                        continue;
+                    int d = manhattanDist(x, y, units[i].tileX, units[i].tileY);
+                    if (d < minDist)
+                        minDist = d;
+                }
+                if (minDist > bestRetreatMinDist)
+                {
+                    bestRetreatMinDist = minDist;
+                    moveToX = x;
+                    moveToY = y;
+                }
+            }
+            else
+            {
+                int d = manhattanDist(x, y, units[nearestEnemy].tileX, units[nearestEnemy].tileY);
+                if (d < bestApproachDist)
+                {
+                    bestApproachDist = d;
+                    moveToX = x;
+                    moveToY = y;
+                }
             }
         }
+    }
+
+    if (attackTileX >= 0)
+    {
+        moveToX = attackTileX;
+        moveToY = attackTileY;
     }
 
     if (moveToX >= 0)
@@ -823,8 +890,8 @@ constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
 
 // Always-available way back to the mission menu, independent of gameOver.
 // Without this, a mission whose win condition can never trigger (m4/m6
-// place no red units, and their scripted spawns aren't ported -- see
-// README) would trap the player in STATE_PLAYING with no way out.
+// place no red units in their map data -- see README) would trap the
+// player in STATE_PLAYING with no way out.
 constexpr int MENU_BTN_W = 50;
 constexpr int MENU_BTN_H = 16;
 constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;
