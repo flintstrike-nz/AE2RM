@@ -1,14 +1,15 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 11**:
+not an automatic conversion — there's no JVM here. This is **milestone 12**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11) — you're always blue,
 the computer is always red, so this is playable single-player — a
-tap-to-inspect unit stat panel (milestone 9), and `m0`'s intro cutscene, the
-first piece of the original's scripted mission events to be ported
-(milestone 10; see "Mission-script interpreter" below for exactly how much
-of the format that covers).
+tap-to-inspect unit stat panel and living-unit-count HUD readout
+(milestones 9, 12), and `m0`'s intro cutscene, the first piece of the
+original's scripted mission events to be ported (milestone 10; see
+"Mission-script interpreter" below for exactly how much of the format that
+covers).
 
 ## Target hardware
 
@@ -140,6 +141,12 @@ not yet confirmed on-device.
   as before -- the two interactions don't conflict since a unit is never
   both at once. No portrait, no per-unit ability text, no equivalent to
   the original's fuller unit-info screen.
+- Living-unit counts: the top HUD bar, next to the BLUE/RED TURN
+  indicator, shows how many of each side's units are still alive, as
+  `blueCount:redCount` in each side's color, recomputed every redraw.
+  Only colors 0/1 are counted -- consistent with the rest of this port,
+  which only ever loads story maps that place those two -- so this
+  isn't a general 4-color skirmish scoreboard.
 - Mission menu: boots to a list of `m0.aem` through `m7.aem`'s real
   titles ("TEMPLE RAIDERS", "TO THE RESCUE", etc. -- locale string
   indices 121-128, `getSaveInfoString()`'s label in the original, close
@@ -208,8 +215,8 @@ tutorial `ShowHelp` overlays checked against live game state, and the
 `CompleteMission` epilogue dialog; not what's causing `m4`/`m6`'s missing
 red units, see above), the original's actual AI (this milestone's is a
 simple heuristic -- see above), the combat property bonuses noted above,
-any HUD beyond the turn indicator/END TURN/MENU buttons/mission
-menu/unit stat panel/dialog box, MIDI music (needs its own synth — see
+any HUD beyond the turn indicator/living-unit counts/END TURN/MENU
+buttons/mission menu/unit stat panel/dialog box, MIDI music (needs its own synth — see
 the "Music" question this was scoped against), and skirmish maps
 (`s0`-`s11`, which would also need a 4-side, non-hardcoded turn queue --
 see the team-color note above). The original `MainDisplayable.java` is

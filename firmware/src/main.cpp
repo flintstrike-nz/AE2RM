@@ -1,4 +1,4 @@
-// AE2RM ESP32 port -- milestone 10: single-player vs. a basic AI, plus
+// AE2RM ESP32 port -- milestone 12: single-player vs. a basic AI, plus
 // m0's mission-script intro cutscene.
 //
 // Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
@@ -18,8 +18,10 @@
 // (attack the weakest in-range enemy, else move-and-attack, else retreat
 // if critically low on health, else close the distance -- see
 // aiActUnit()'s comment; not a port of the original's scoring-heuristic
-// AI) and hands back control. Tap any other living unit (an enemy, or
-// one that's already moved) to see its stats instead. A side loses when
+// AI) and hands back control. A living-unit-count readout next to the
+// turn indicator (blue:red, colors 0/1 only) tracks how the battle
+// stands. Tap any other living unit (an enemy, or one that's already
+// moved) to see its stats instead. A side loses when
 // its king dies -- a simplification of the original's
 // castle-capture-tied defeat condition, see README -- and tapping the
 // win banner, or the always-available MENU button, returns to the
@@ -1566,6 +1568,32 @@ void drawViewport()
     gfx.setTextSize(1);
     gfx.setCursor(2, 4);
     gfx.print(currentTurn == 0 ? "BLUE TURN" : "RED TURN");
+
+    // Living-unit counts, both sides -- how the battle stands at a glance,
+    // updated every redraw since a unit can die on any turn (yours or the
+    // AI's). Only colors 0 (blue)/1 (red) are counted: story maps never
+    // place units of the other two team colors this port's asset pipeline
+    // converts (see the team-color note in firmware/README.md), so a
+    // green/black count would always read 0 here.
+    int blueAlive = 0, redAlive = 0;
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (!units[i].alive)
+            continue;
+        if (units[i].color == 0)
+            ++blueAlive;
+        else if (units[i].color == 1)
+            ++redAlive;
+    }
+    constexpr int UNIT_COUNT_X = 96;
+    gfx.fillRect(UNIT_COUNT_X, 0, MENU_BTN_X - UNIT_COUNT_X, 16, TFT_BLACK);
+    gfx.setCursor(UNIT_COUNT_X, 4);
+    gfx.setTextColor(TFT_BLUE, TFT_BLACK);
+    gfx.print(blueAlive);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.print(":");
+    gfx.setTextColor(TFT_RED, TFT_BLACK);
+    gfx.print(redAlive);
 
     gfx.fillRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_DARKGREY);
     gfx.drawRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_WHITE);

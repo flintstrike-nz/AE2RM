@@ -49,6 +49,8 @@ the full pinout and hardware details.
 - **A unit stat panel**: tap any unit you can't currently act with — an
   enemy, or one that's already moved — to see its type, HP, attack,
   defence, range, and movement
+- **A living-unit-count readout**: the HUD shows how many of each side's
+  units are still alive, next to the turn indicator
 - **Real mission titles**, and **`m0`'s intro cutscene**: the original's
   localized string table (`lang.dat`) is now read for mission-menu
   labels and for actual English dialog text, and a small interpreter
@@ -104,6 +106,9 @@ history.
 11. [AI terrain awareness](https://github.com/hayden-flintoft/AE2RM/pull/11)
     — when multiple attack tiles tie on target weakness, prefers the
     one with the best terrain defence bonus
+12. [Living-unit-count HUD](https://github.com/hayden-flintoft/AE2RM/pull/12)
+    — how many of each side's units are still alive, next to the turn
+    indicator
 
 **Planned, not yet started (no fixed order):**
 
