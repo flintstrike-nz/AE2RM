@@ -1,8 +1,84 @@
 # AE2RM
-**Ancient Empires 2 Revolution Mod (AE2RM)**: game download & source code.
 
-The goal of this project is to port this game to ESP32
-* [**Project main page**](https://web.archive.org/web/20201110233517/http://projectd8.org/Ancient_Empires_II_RM)
-* [Download games (`jar` directory)](jar/)
-* [Source code (`src` directory)](src/)
-* [ESP32 port in progress (`firmware` directory)](firmware/)
+**Ancient Empires 2 Revolution Mod (AE2RM)** — a turn-based tactics game
+originally released for J2ME (feature) phones. This repository hosts the
+game's original download and source code, plus an in-progress ESP32-S3
+port that rewrites it from scratch for real hardware.
+
+* [Project main page (archived)](https://web.archive.org/web/20201110233517/http://projectd8.org/Ancient_Empires_II_RM)
+* [Download the original game (`jar/`)](jar/)
+* [Original J2ME source code (`src/`)](src/)
+* [ESP32 port (`firmware/`)](firmware/)
+
+## The ESP32 port
+
+`firmware/` is a ground-up rewrite of the game in C++/Arduino for an
+ESP32-S3 board, not an automatic conversion — the original is J2ME/MIDP
+Java (~19,500 lines), and there's no JVM on a microcontroller. Every
+subsystem below was ported by reading the decompiled original
+(`src/java/src/aeii/*.java`) and its data files (`.unit`, `.prop`, `.aem`
+map format) and re-implementing the relevant behavior in C++, verifying
+each new table against its source file field-by-field where practical.
+
+**Target hardware:** an ESP32-S3 2.8" board, ES3C28P ("Xiaozhi" variant)
+— ILI9341 240x320 SPI TFT, FT6336 capacitive touch, SD/MMC storage,
+16MB flash, PSRAM. See [`firmware/README.md`](firmware/README.md) for
+the full pinout and hardware details.
+
+### What works today
+
+- **Rendering**: the original's tile/sprite assets are converted to raw
+  RGB565 by `firmware/tools/convert_assets.py` and loaded from a microSD
+  card; the game renders a scrollable, touch-pannable view of the map
+- **All 8 story maps** (`m0`-`m7`), loaded from the original `.aem`
+  binary format, with a mission-select menu
+- **Units**: all 12 unit types, rendered as team-colored map icons, with
+  real movement ranges and terrain movement costs taken directly from
+  the original's `.unit` and tileset data files
+- **Combat**: damage, counterattacks, and unit death, following the core
+  of the original's damage formula (without its per-unit matchup
+  bonuses — see the firmware README for exactly what's and isn't ported)
+- **Capture**: villages and castles change ownership when the right unit
+  type moves onto them, matching the original's capture-eligibility
+  rules exactly
+- **A basic AI opponent**: you play blue, the computer plays red — this
+  makes the game genuinely single-player, though the AI is a simple
+  heuristic, not a port of the original's scoring-based AI
+- **OTA firmware updates** over WiFi, after an initial USB flash
+
+### What's not there yet
+
+An AI on par with the original, the original's scripted mid-mission
+events (two maps currently have fewer enemies than intended as a
+result), in-game menus beyond mission select, and MIDI music (the
+original's music format needs its own synthesizer — there's no audio
+subsystem yet). See [`firmware/README.md`](firmware/README.md) for the
+full list and the reasoning behind each scoping decision.
+
+### Verification status
+
+**This firmware has not yet been flashed to or run on physical
+hardware.** Development has happened without direct access to the
+target board: every piece of game data (movement ranges, combat stats,
+terrain costs, capture rules) has been cross-checked against the
+original's source files, and the code builds cleanly, but nothing has
+been confirmed against real touch input, display output, or timing.
+Display and touch GPIO pins have been confirmed working by the hardware
+owner; several other pin assignments and behaviors are still flagged as
+unverified in `firmware/README.md`. If you're picking this repository
+up, flashing it and reporting back what you see is the most valuable
+next step.
+
+## Building the firmware
+
+```bash
+cd src && make               # extracts AEIIRM_src.zip -> src/java
+cd ../firmware
+pip install Pillow
+python3 tools/convert_assets.py
+# copy firmware/assets/sdcard/ onto a FAT32 microSD card
+pio run -t upload            # requires PlatformIO: pip install platformio
+```
+
+Full build, flash, and OTA-update instructions are in
+[`firmware/README.md`](firmware/README.md).
