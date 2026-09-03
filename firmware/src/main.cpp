@@ -664,7 +664,7 @@ void playHitEffect(int unitIdx, int hit)
         {
             char path[32];
             snprintf(path, sizeof(path), "/effects/redspark_%02d.bin", frame);
-            File f = SD_MMC.open(path, FILE_READ);
+            File f = openAsset(path);
             sheetOk = f && f.read(reinterpret_cast<uint8_t *>(sheet + (size_t)frame * FRAME_PIXELS),
                                    FRAME_PIXELS * sizeof(uint16_t)) == FRAME_PIXELS * sizeof(uint16_t);
             if (f)
@@ -1142,14 +1142,14 @@ void showTitleScreen()
 
     if (ok)
     {
-        File f = SD_MMC.open("/title/splash.bin", FILE_READ);
+        File f = openAsset("/title/splash.bin");
         ok = f && f.read(reinterpret_cast<uint8_t *>(splash), SPLASH_PIXELS * sizeof(uint16_t)) == SPLASH_PIXELS * sizeof(uint16_t);
         if (f)
             f.close();
     }
     if (ok)
     {
-        File f = SD_MMC.open("/title/logo.bin", FILE_READ);
+        File f = openAsset("/title/logo.bin");
         ok = f && f.read(reinterpret_cast<uint8_t *>(logo), LOGO_PIXELS * sizeof(uint16_t)) == LOGO_PIXELS * sizeof(uint16_t);
         if (f)
             f.close();
