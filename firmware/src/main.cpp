@@ -296,6 +296,13 @@ static int winnerColor = -1; // colour of the last side standing, or -1 for a dr
 // loser. Set at the end of startGame(); carried in a save.
 static int startingUnits[MAX_PLAYERS] = {0, 0, 0, 0};
 
+// Latched true once a side that started with units has none left (wiped
+// out, or routed by its king's death). A defeated side stays defeated:
+// switchTurn() skips its slot in the queue and the shop refuses it, so a
+// later recruit can't bring it back into a 3-4 way fight. Cleared in
+// startGame(); carried in a save.
+static bool eliminated[MAX_PLAYERS] = {false, false, false, false};
+
 // The mission startGame() most recently loaded (m<currentMapIndex>.aem),
 // or -1 before any mission has loaded. Only used by the win/loss banner's
 // RETRY button to reload the same mission without a trip through the
@@ -636,15 +643,16 @@ inline void centerViewOnTile(int tx, int ty)
     clampView();
 }
 
-// Ends the mission the moment one side has no units left. King death is a
-// faster, separate instant-win kept in resolveHit() (killing the king
-// ends it even with other enemy units still standing -- the documented
-// simplification of the original's castle-capture-tied defeat). This
-// catches every other finish -- clearing the last non-king enemy, or
-// losing your own last unit -- which nothing checked before, so the
-// player was left stuck on a won board with no banner and no way to end
-// the mission. A no-op once gameOver is set; call after any combat
-// exchange and after each turn resolves.
+// Runs the last-side-standing check. A side is out once it has no living
+// units -- either wiped out in combat, or routed the instant its king
+// dies (resolveHit() clears every unit of that colour). That defeat is
+// latched into eliminated[] here so it can't be undone by a later
+// recruit. The mission ends once at most one side that started with
+// units still has any; winnerColor is that side (or -1 if the last two
+// fell in the same exchange -- a draw). A simplification of the
+// original's castle-capture-tied defeat, see README. A no-op once
+// gameOver is set; call after any combat exchange and after each turn
+// resolves.
 void checkEndConditions()
 {
     if (gameOver)
@@ -666,6 +674,8 @@ void checkEndConditions()
             ++sidesLeft;
             lastLeft = c;
         }
+        else
+            eliminated[c] = true; // latched -- no coming back via recruitment
     }
 
     // Nothing to decide on a one-side sandbox map; otherwise the mission
@@ -1715,7 +1725,10 @@ bool startGame(int mapIndex, bool interactive = true)
     shopOpen = false;
     shopBuyType = -1;
     for (int c = 0; c < MAX_PLAYERS; ++c)
+    {
         gold[c] = 0; // story maps start every side at 0 in the original
+        eliminated[c] = false;
+    }
 
     // Story maps m0-m7 are always a 2-side blue-vs-red fight (see the
     // team-colour note in the README). Skirmish maps will derive a
@@ -1758,6 +1771,10 @@ bool startGame(int mapIndex, bool interactive = true)
     for (int i = 0; i < unitCount; ++i)
         if (units[i].alive && units[i].color < MAX_PLAYERS)
             startingUnits[units[i].color]++;
+
+    // Redraw now that the roster is known -- drawHud()'s footer side
+    // tally reads startingUnits[], and the render above ran before this.
+    drawViewport();
     return true;
 }
 
@@ -2068,7 +2085,7 @@ void aiActUnit(int idx)
 // on why the AI here isn't a port of the original's.
 void aiTryRecruit(int color)
 {
-    if (gameOver || ownedCastleCount(color) == 0 || unitCount >= MAX_UNITS)
+    if (gameOver || eliminated[color] || ownedCastleCount(color) == 0 || unitCount >= MAX_UNITS)
         return;
     int myUnits = 0;
     for (int i = 0; i < unitCount; ++i)
@@ -2173,7 +2190,17 @@ void switchTurn()
             pos = i;
             break;
         }
-    currentTurn = turnQueue[(pos + 1) % turnQueueLen];
+    // Advance to the next side still in the fight -- skip any that have
+    // been eliminated so a defeated colour never gets another turn.
+    for (int step = 1; step <= turnQueueLen; ++step)
+    {
+        int cand = turnQueue[(pos + step) % turnQueueLen];
+        if (!eliminated[cand])
+        {
+            currentTurn = cand;
+            break;
+        }
+    }
 
     for (int i = 0; i < unitCount; ++i)
         if (units[i].color == currentTurn)
@@ -2467,7 +2494,7 @@ void handleTap(int screenX, int screenY)
     {
         selectedUnit = infoUnit = -1;
         // Recruiting needs your turn and a castle to deploy next to.
-        if (currentTurn == HUMAN_COLOR && !gameOver && ownedCastleCount(HUMAN_COLOR) > 0)
+        if (currentTurn == HUMAN_COLOR && !gameOver && !eliminated[HUMAN_COLOR] && ownedCastleCount(HUMAN_COLOR) > 0)
         {
             shopOpen = true;
             shopBuyType = -1;
@@ -2665,7 +2692,7 @@ void drawHud()
             gfx.fillRect(bx, MENU_BTN_Y + 8 + k * 6, bw, 3, TFT_WHITE);
     }
 
-    bool shopReady = currentTurn == HUMAN_COLOR && !gameOver && ownedCastleCount(HUMAN_COLOR) > 0;
+    bool shopReady = currentTurn == HUMAN_COLOR && !gameOver && !eliminated[HUMAN_COLOR] && ownedCastleCount(HUMAN_COLOR) > 0;
     uint16_t cartColor = shopReady ? GOLD_COLOR : 0x7BEF;
     gfx.fillRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_DARKGREY : 0x2104);
     gfx.drawRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_WHITE : 0x7BEF);
@@ -2754,6 +2781,7 @@ struct SaveBlob
     int32_t startUnits[MAX_PLAYERS]; // per-side starting roster, for checkEndConditions()
     int32_t queueLen;               // active sides this game
     uint8_t queue[MAX_PLAYERS];     // turn order
+    uint8_t elim[MAX_PLAYERS];      // latched per-side defeat
     uint8_t over;
     int8_t winner;
     UnitPlacement units[MAX_UNITS];
@@ -2789,6 +2817,7 @@ bool saveGame()
         b.gold[c] = gold[c];
         b.startUnits[c] = startingUnits[c];
         b.queue[c] = turnQueue[c];
+        b.elim[c] = eliminated[c] ? 1 : 0;
     }
     b.queueLen = turnQueueLen;
     b.viewX = viewX;
@@ -2822,6 +2851,27 @@ bool loadGame()
         b.count < 0 || b.count > MAX_UNITS)
         return false;
 
+    // Validate the serialized turn model before anything indexes gold[]
+    // or walks the queue with it: length in range, every active colour
+    // unique and in range, and the saved current turn present in the
+    // queue. A corrupt/tampered blob otherwise reads gold[] out of
+    // bounds or spins switchTurn().
+    if (b.queueLen < 2 || b.queueLen > MAX_PLAYERS)
+        return false;
+    bool seen[MAX_PLAYERS] = {false};
+    bool turnInQueue = false;
+    for (int i = 0; i < (int)b.queueLen; ++i)
+    {
+        uint8_t c = b.queue[i];
+        if (c >= MAX_PLAYERS || seen[c])
+            return false;
+        seen[c] = true;
+        if ((int32_t)c == b.turn)
+            turnInQueue = true;
+    }
+    if (!turnInQueue)
+        return false;
+
     // Reload terrain (no briefing/cutscene -- they ran when this game was
     // first started). If the map won't load, or its size no longer
     // matches the snapshot (assets changed under an old save), bail
@@ -2842,8 +2892,9 @@ bool loadGame()
         gold[c] = b.gold[c];
         startingUnits[c] = b.startUnits[c];
         turnQueue[c] = b.queue[c];
+        eliminated[c] = b.elim[c] != 0;
     }
-    turnQueueLen = (b.queueLen >= 2 && b.queueLen <= MAX_PLAYERS) ? (int)b.queueLen : 2;
+    turnQueueLen = (int)b.queueLen;
     unitCount = (int)b.count;
     memcpy(units, b.units, sizeof(units));
     gameOver = b.over != 0;
