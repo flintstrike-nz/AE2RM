@@ -37,7 +37,9 @@ the full pinout and hardware details.
   the original's `.unit` and tileset data files
 - **Combat**: damage, counterattacks, and unit death, following the core
   of the original's damage formula (without its per-unit matchup
-  bonuses — see the firmware README for exactly what's and isn't ported)
+  bonuses — see the firmware README for exactly what's and isn't ported),
+  with the original's own spark effect and a damage number over every
+  hit, paced so an attack and its counter are both actually visible
 - **Capture**: villages and castles change ownership when the right unit
   type moves onto them, matching the original's capture-eligibility
   rules exactly
@@ -56,6 +58,7 @@ the full pinout and hardware details.
   right away instead of going back through the mission menu
 - **A mission briefing** before every mission: a full-screen card
   showing its real title and objective text, tap to start
+- **A title screen** at boot, using the original's own splash/logo art
 - **Real mission titles**, and **`m0`'s intro cutscene**: the original's
   localized string table (`lang.dat`) is now read for mission-menu
   labels and for actual English dialog text, and a small interpreter
@@ -122,6 +125,9 @@ history.
 15. [Mission briefing](https://github.com/hayden-flintoft/AE2RM/pull/15)
     — a full-screen title-and-objective card before every mission,
     using locale strings discovered but unused since milestone 10
+16. [Title screen and battle animations](https://github.com/hayden-flintoft/AE2RM/pull/16)
+    — the original's splash/logo art at boot, and a spark + damage
+    number on every hit, using the original's own combat effect sprite
 
 **Planned, not yet started (no fixed order):**
 

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Convert AE2RM J2ME assets into the raw formats the ESP32 firmware reads
-from the SD card: the tiles0 tileset, unit icons, and all 8 story maps
+from the SD card: the tiles0 tileset, unit icons, all 8 story maps
 (m0-m7 -- the "m*.aem" set loadMap() always builds the same 2-side team
 queue for, see main.cpp's UnitPlacement comment; skirmish maps s0-s11
-aren't converted).
+aren't converted), the localized string table, m0's mission script, the
+title screen, and the combat hit-flash effect.
 
 Usage:
     pip install Pillow
@@ -47,6 +48,18 @@ Output layout on the SD card:
                                 runIntroScript(); the rest (Test-driven
                                 tutorial hints and the ending dialog,
                                 @Case 14 onward) isn't ported yet.
+    /title/splash.bin           -- 240x320 RGB565, transparent -- the
+                                original's title-screen background
+                                (splash.png), shown full-screen at boot.
+    /title/logo.bin              -- 240x85 RGB565, transparent -- the
+                                original's game logo (logo.png), composited
+                                over the splash background.
+    /effects/redspark_NN.bin    -- 20x20 RGB565, transparent, one file per
+                                redspark.sprite frame (NN = 00..05) -- the
+                                original's combat hit-flash effect
+                                (createSimpleSparkSprite() with sprRedSpark
+                                in MainDisplayable.java), played by
+                                main.cpp's playHitEffect() on every hit.
 """
 import os
 import shutil
@@ -99,6 +112,28 @@ def write_raw565(im, dst_bin, transparent=False):
 
 def convert_tile(src_png, dst_bin):
     write_raw565(Image.open(src_png).convert("RGB"), dst_bin)
+
+
+REDSPARK_FRAME_SIZE = 20  # redspark.sprite: FrameWidth/Height 20, FrameCount 6
+REDSPARK_FRAME_COUNT = 6
+
+
+def convert_redspark(dst_dir):
+    # redspark.png is a 120x20 sheet: 6 frames of 20x20 laid out left to
+    # right in one row. Cropped into one file per frame (matching the
+    # tile/unit-icon convention below) rather than converted as one flat
+    # image -- the firmware loads each frame into a contiguous per-frame
+    # buffer slot, which only works if each frame's bytes are contiguous
+    # in its own file; a single raw conversion of the whole sheet would
+    # interleave all 6 frames' pixels row by row instead.
+    im = Image.open(os.path.join(RES_DIR, "redspark.png")).convert("RGBA")
+    for frame in range(REDSPARK_FRAME_COUNT):
+        box = (
+            frame * REDSPARK_FRAME_SIZE, 0,
+            (frame + 1) * REDSPARK_FRAME_SIZE, REDSPARK_FRAME_SIZE,
+        )
+        dst = os.path.join(dst_dir, f"redspark_{frame:02d}.bin")
+        write_raw565(im.crop(box), dst, transparent=True)
 
 
 def convert_unit_icons(color, dst_dir):
@@ -167,6 +202,25 @@ def main():
         print(f"WARNING: {LANG_PATH} not found -- skipping strings.dat "
               "(mission menu falls back to generic titles, m0's intro "
               "cutscene won't have dialog text)")
+
+    # Title screen: splash.png is exactly 240x320 -- a pixel-perfect match
+    # for this display -- with logo.png (240x85) composited over it. Both
+    # carry real alpha (confirmed against the source PNGs, not just
+    # assumed), so converted the same transparent way as unit icons.
+    title_out = os.path.join(OUT_DIR, "title")
+    os.makedirs(title_out, exist_ok=True)
+    write_raw565(Image.open(os.path.join(RES_DIR, "splash.png")).convert("RGBA"),
+                 os.path.join(title_out, "splash.bin"), transparent=True)
+    write_raw565(Image.open(os.path.join(RES_DIR, "logo.png")).convert("RGBA"),
+                 os.path.join(title_out, "logo.bin"), transparent=True)
+    print("converted splash.png, logo.png -> title/")
+
+    # Combat hit-flash effect (createSimpleSparkSprite() with sprRedSpark
+    # in MainDisplayable.java).
+    effects_out = os.path.join(OUT_DIR, "effects")
+    os.makedirs(effects_out, exist_ok=True)
+    convert_redspark(effects_out)
+    print(f"converted redspark.png -> effects/redspark_*.bin ({REDSPARK_FRAME_COUNT} frames)")
 
     scripts_out = os.path.join(OUT_DIR, "scripts")
     os.makedirs(scripts_out, exist_ok=True)

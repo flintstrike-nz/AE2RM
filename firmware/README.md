@@ -1,16 +1,17 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 15**:
+not an automatic conversion — there's no JVM here. This is **milestone 16**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11, 13) — you're always
 blue, the computer is always red, so this is playable single-player — a
 tap-to-inspect unit stat panel, living-unit-count HUD readout, and RETRY
 button on the win/loss banner (milestones 9, 12, 14), a full-screen mission
-briefing before every mission (milestone 15), and `m0`'s intro cutscene,
-the first piece of the original's scripted mission events to be ported
-(milestone 10; see "Mission-script interpreter" below for exactly how much
-of the format that covers).
+briefing before every mission (milestone 15), a title screen and a combat
+hit-flash effect using the original's own art (milestone 16), and `m0`'s
+intro cutscene, the first piece of the original's scripted mission events
+to be ported (milestone 10; see "Mission-script interpreter" below for
+exactly how much of the format that covers).
 
 ## Target hardware
 
@@ -83,6 +84,23 @@ not yet confirmed on-device.
   attack" per turn, not the original's "move then attack" -- combining
   the two would need tracking attack range from every tile in the move
   range, not just the unit's current one, which is out of scope here.
+- Hit-flash effect (`playHitEffect()` in `main.cpp`, new this milestone):
+  every hit -- the direct attack and, if it happens, the counterattack --
+  plays the original's own combat spark (`createSimpleSparkSprite()`
+  with `sprRedSpark` in `MainDisplayable.java`, converted from
+  `redspark.png`'s 6-frame sheet) over the target's tile, with a static
+  "-N" damage label. A real pause (`COUNTERATTACK_PAUSE_MS`, 300ms)
+  separates the attack from the counter so both are actually visible,
+  not just one final redraw -- an approximation of the original's own
+  ~800ms gap between them. Not ported: the original's damage label
+  rises and fades over that time; this just holds it in place for the
+  spark's duration then lets the next redraw clear it (this port has no
+  alpha-blending pipeline to fade it with). Each of the 6 frames forces
+  a full `drawViewport()` redraw first -- `pushImage()`'s transparent-skip
+  only omits *source* pixels that are transparent, so without resetting
+  the background before every frame, the previous frame's opaque pixels
+  would smear into the next -- unverified on real hardware whether that
+  redraw-per-frame cost makes the animation feel too slow.
 - Basic AI (`aiActUnit()` in `main.cpp`): color 1 (red) is always the
   computer, color 0 (blue) is always you -- there's no way to flip this,
   and the two-human hotseat mode from earlier milestones no longer
@@ -158,6 +176,20 @@ not yet confirmed on-device.
   Only colors 0/1 are counted -- consistent with the rest of this port,
   which only ever loads story maps that place those two -- so this
   isn't a general 4-color skirmish scoreboard.
+- Title screen (`showTitleScreen()` in `main.cpp`, new this milestone):
+  shown once at boot, before the mission menu -- the original's own
+  `splash.png` (exactly 240x320, a pixel-perfect match for this
+  display) with `logo.png` composited over it, tap to continue. Not the
+  original's actual title screen: that's a multi-stage alpha-fade
+  transition (a studio splash fades in and out, then the game logo
+  fades in over black, then the background fades in behind it with its
+  own glow effect -- `updateIntroTransition()` in
+  `MainDisplayable.java`) driven by an alpha counter this port has no
+  blending pipeline for. This shows the two images statically instead
+  of animating the transition between them, and doesn't show the
+  studio splash (`ms_logo.png`) at all -- a real simplification,
+  documented in the code rather than silently dropped. Skipped entirely
+  (straight to the menu) if either asset is missing.
 - Mission menu: boots to a list of `m0.aem` through `m7.aem`'s real
   titles ("TEMPLE RAIDERS", "TO THE RESCUE", etc. -- locale string
   indices 121-128, `getSaveInfoString()`'s label in the original, close

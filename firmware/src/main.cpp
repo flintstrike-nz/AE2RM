@@ -1,22 +1,26 @@
-// AE2RM ESP32 port -- milestone 15: single-player vs. a basic AI, plus
+// AE2RM ESP32 port -- milestone 16: single-player vs. a basic AI, plus
 // m0's mission-script intro cutscene.
 //
-// Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
-// when /strings.dat loaded -- see loadStrings() -- else a generic
-// "Mission N" label). Tap one to play: a full-screen briefing card (title
-// + objective text, see showMissionBriefing()) shows first for every
-// mission, tap to start. You are always blue, the computer is always red.
-// m0 additionally runs its mission-script's intro cutscene once at
-// mission start, after the briefing (see runIntroScript()) before handing
-// control to you -- real dialog text, a couple of scripted unit
-// moves/removals, and camera pans; the other 7 maps start playable
-// immediately after their briefing. Tap a unit
-// belonging to the current turn's side to select it -- its movement range
-// highlights cyan (terrain-cost-limited flood fill) and any enemy already
-// in its attack range highlights red. Tap a cyan tile to move there
-// (capturing a village/castle you move onto, if this unit type can), tap
-// a red-highlighted enemy to attack it (one action per unit per turn --
-// this is "move OR attack", not the original's "move then attack"), tap
+// Boots to a title screen (the original's own splash/logo art, see
+// showTitleScreen()), tap to continue, then a mission menu (m0.aem-m7.aem,
+// showing each map's real title when /strings.dat loaded -- see
+// loadStrings() -- else a generic "Mission N" label). Tap one to play: a
+// full-screen briefing card (title + objective text, see
+// showMissionBriefing()) shows first for every mission, tap to start. You
+// are always blue, the computer is always red. m0 additionally runs its
+// mission-script's intro cutscene once at mission start, after the
+// briefing (see runIntroScript()) before handing control to you -- real
+// dialog text, a couple of scripted unit moves/removals, and camera pans;
+// the other 7 maps start playable immediately after their briefing. Tap a
+// unit belonging to the current turn's side to select it -- its movement
+// range highlights cyan (terrain-cost-limited flood fill) and any enemy
+// already in its attack range highlights red. Tap a cyan tile to move
+// there (capturing a village/castle you move onto, if this unit type
+// can), tap a red-highlighted enemy to attack it (one action per unit per
+// turn -- this is "move OR attack", not the original's "move then
+// attack"). Every hit -- and the counterattack, if it happens -- plays
+// the original's own spark effect and a damage number over the target
+// (see playHitEffect()), paced so both are actually visible. Tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
 // (attack a guaranteed kill if one's in range, else the weakest in-range
 // enemy, else move-and-attack, else retreat if critically low on health,
@@ -494,6 +498,9 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
     return inAttackRangeFrom(attacker.type, attacker.tileX, attacker.tileY, tx, ty);
 }
 
+void drawViewport(); // defined below; playHitEffect() redraws between animation frames
+void clampView();    // defined below; playHitEffect() re-centers the camera on off-screen combat
+
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
 // victimIdx's defence (base + terrain bonus), scaled by the attacker's
 // current health%. Shared by attackUnit()'s direct hit and its
@@ -501,8 +508,9 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 // matchup bonuses (mounted-vs-ground, golem-vs-skeleton, water/swamp
 // bonuses, etc. -- see Unit.java's getOffenceBonusAgainstUnit()):
 // UNIT_PROPERTIES is read elsewhere for capture eligibility, but the
-// matchup-bonus bits it also carries aren't interpreted here.
-void resolveHit(int attackerIdx, int victimIdx)
+// matchup-bonus bits it also carries aren't interpreted here. Returns the
+// damage dealt, for attackUnit()'s hit-effect animation.
+int resolveHit(int attackerIdx, int victimIdx)
 {
     UnitPlacement &attacker = units[attackerIdx];
     UnitPlacement &victim = units[victimIdx];
@@ -537,6 +545,89 @@ void resolveHit(int attackerIdx, int victimIdx)
             Serial.printf("game over: color %d wins (king killed)\n", winnerColor);
         }
     }
+    return hit;
+}
+
+// Plays the original's hit-flash effect (createSimpleSparkSprite() with
+// sprRedSpark in MainDisplayable.java) over unitIdx's tile: a 6-frame
+// spark animation (/effects/redspark_NN.bin, one file per frame -- see
+// convert_assets.py's comment on why the sheet is split into per-frame
+// files rather than converted as one image) with a "-N" damage label.
+// Not ported: the original's damage label rises and fades over ~800ms;
+// this just holds it static for the spark's duration, then lets the next
+// drawViewport() clear it -- simpler, and this display has no alpha
+// blending to fade it with anyway. Does nothing if a frame failed to
+// load (e.g. missing from the SD card) -- this is cosmetic, not worth
+// failing an attack over.
+void playHitEffect(int unitIdx, int hit)
+{
+    const UnitPlacement &u = units[unitIdx];
+    int px = u.tileX * TILE_SIZE - viewX;
+    int py = u.tileY * TILE_SIZE - viewY;
+    if (px <= -TILE_SIZE || py <= -TILE_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
+    {
+        // AI combat happens anywhere on the map -- runAITurn() never
+        // moves the camera -- so this isn't a rare edge case; recenter
+        // the viewport on the target instead of silently skipping the
+        // effect, so every hit actually gets one, not just combat that
+        // happened to already be in view.
+        viewX = u.tileX * TILE_SIZE - DISPLAY_WIDTH / 2;
+        viewY = u.tileY * TILE_SIZE - DISPLAY_HEIGHT / 2;
+        clampView();
+        px = u.tileX * TILE_SIZE - viewX;
+        py = u.tileY * TILE_SIZE - viewY;
+    }
+
+    constexpr int SPARK_FRAME_W = 20, SPARK_FRAME_H = 20, SPARK_FRAME_COUNT = 6;
+    constexpr size_t FRAME_PIXELS = (size_t)SPARK_FRAME_W * SPARK_FRAME_H;
+    constexpr unsigned long FRAME_DELAY_MS = 60;
+
+    // Loaded once and cached (in .bss, not PSRAM -- 2400 pixels total is
+    // trivial) since combat calls this repeatedly; sheetLoaded latches
+    // even on failure so a missing asset isn't re-read from SD every hit.
+    static uint16_t sheet[SPARK_FRAME_COUNT * FRAME_PIXELS];
+    static bool sheetLoaded = false, sheetOk = false;
+    if (!sheetLoaded)
+    {
+        sheetLoaded = true;
+        sheetOk = true;
+        for (int frame = 0; frame < SPARK_FRAME_COUNT && sheetOk; ++frame)
+        {
+            char path[32];
+            snprintf(path, sizeof(path), "/effects/redspark_%02d.bin", frame);
+            File f = SD_MMC.open(path, FILE_READ);
+            sheetOk = f && f.read(reinterpret_cast<uint8_t *>(sheet + (size_t)frame * FRAME_PIXELS),
+                                   FRAME_PIXELS * sizeof(uint16_t)) == FRAME_PIXELS * sizeof(uint16_t);
+            if (f)
+                f.close();
+        }
+    }
+
+    char label[8];
+    snprintf(label, sizeof(label), "-%d", hit);
+    int sparkX = px + (TILE_SIZE - SPARK_FRAME_W) / 2;
+    int sparkY = py + (TILE_SIZE - SPARK_FRAME_H) / 2;
+    int labelY = py >= 10 ? py - 10 : py + TILE_SIZE; // keep the label on-screen for a unit at the very top row
+
+    for (int frame = 0; frame < SPARK_FRAME_COUNT; ++frame)
+    {
+        // A full redraw each frame, not just erasing the spark rect: pushImage()
+        // only skips transparent source pixels, so without resetting the
+        // background first, the previous frame's opaque pixels would smear
+        // into the next.
+        drawViewport();
+        gfx.startWrite();
+        if (sheetOk)
+            gfx.pushImage(sparkX, sparkY, SPARK_FRAME_W, SPARK_FRAME_H,
+                           sheet + (size_t)frame * FRAME_PIXELS, TRANSPARENT_565);
+        gfx.setTextSize(1);
+        gfx.fillRect(px, labelY, 26, 10, TFT_BLACK);
+        gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+        gfx.setCursor(px + 1, labelY + 1);
+        gfx.print(label);
+        gfx.endWrite();
+        delay(FRAME_DELAY_MS);
+    }
 }
 
 // Resolves attackerIdx attacking victimIdx, then victimIdx's counterattack
@@ -546,9 +637,16 @@ void resolveHit(int attackerIdx, int victimIdx)
 // (a ranged-only unit like the catapult, MIN_ATTACK_RANGE 2, can never
 // counter). Not ported: canPerformCloseAttack() also checks the victim's
 // unitState != 4, a status-effect flag this milestone doesn't model.
+// Each hit plays playHitEffect() where it lands, with a real pause before
+// the counter -- so a human watching (or an AI turn resolving several
+// attacks) sees the exchange happen rather than the whole thing landing
+// in one silent redraw, matching the original's own paced attack/counter
+// (createSimpleSparkSprite() + an ~800ms wait between them).
+constexpr unsigned long COUNTERATTACK_PAUSE_MS = 300;
 void attackUnit(int attackerIdx, int victimIdx)
 {
-    resolveHit(attackerIdx, victimIdx);
+    int hit = resolveHit(attackerIdx, victimIdx);
+    playHitEffect(victimIdx, hit);
 
     UnitPlacement &attacker = units[attackerIdx];
     UnitPlacement &victim = units[victimIdx];
@@ -556,7 +654,9 @@ void attackUnit(int attackerIdx, int victimIdx)
         manhattanDist(victim.tileX, victim.tileY, attacker.tileX, attacker.tileY) == 1 &&
         UNIT_ATTACK_RANGE_MIN[victim.type] == 1)
     {
-        resolveHit(victimIdx, attackerIdx);
+        delay(COUNTERATTACK_PAUSE_MS);
+        int counterHit = resolveHit(victimIdx, attackerIdx);
+        playHitEffect(attackerIdx, counterHit);
     }
 }
 
@@ -937,6 +1037,68 @@ void showMissionBriefing(int mapIndex)
     gfx.endWrite();
 
     waitForTapRelease();
+}
+
+// A one-time title screen shown at boot, before the mission menu: the
+// original's splash.png background with logo.png composited over it,
+// tap to continue. Not the original's actual title screen: that's a
+// multi-stage alpha-fade transition (a small studio logo fades in and
+// out, then the game logo fades in over black, then the splash
+// background fades in behind it with its own glow effect --
+// updateIntroTransition() in MainDisplayable.java) driven by a
+// combatDrapValue counter this port has no equivalent alpha-blending
+// pipeline for. This shows the two images statically instead of
+// animating the transition between them -- a real simplification, not
+// silently dropped. ms_logo.png (the studio splash) isn't shown at all.
+// Skipped entirely (straight into the menu) if either asset is missing,
+// same graceful-degradation pattern as strings.dat/m0.script.
+void showTitleScreen()
+{
+    constexpr size_t SPLASH_PIXELS = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT;
+    constexpr int LOGO_H = 85;
+    constexpr size_t LOGO_PIXELS = (size_t)DISPLAY_WIDTH * LOGO_H;
+    constexpr int LOGO_Y = 20; // approximate placement -- see this function's comment
+
+    uint16_t *splash = static_cast<uint16_t *>(ps_malloc(SPLASH_PIXELS * sizeof(uint16_t)));
+    uint16_t *logo = static_cast<uint16_t *>(ps_malloc(LOGO_PIXELS * sizeof(uint16_t)));
+    bool ok = splash && logo;
+
+    if (ok)
+    {
+        File f = SD_MMC.open("/title/splash.bin", FILE_READ);
+        ok = f && f.read(reinterpret_cast<uint8_t *>(splash), SPLASH_PIXELS * sizeof(uint16_t)) == SPLASH_PIXELS * sizeof(uint16_t);
+        if (f)
+            f.close();
+    }
+    if (ok)
+    {
+        File f = SD_MMC.open("/title/logo.bin", FILE_READ);
+        ok = f && f.read(reinterpret_cast<uint8_t *>(logo), LOGO_PIXELS * sizeof(uint16_t)) == LOGO_PIXELS * sizeof(uint16_t);
+        if (f)
+            f.close();
+    }
+
+    if (ok)
+    {
+        gfx.startWrite();
+        gfx.fillScreen(TFT_BLACK);
+        gfx.pushImage(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, splash, TRANSPARENT_565);
+        gfx.pushImage(0, LOGO_Y, DISPLAY_WIDTH, LOGO_H, logo, TRANSPARENT_565);
+        gfx.setTextSize(1);
+        gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+        gfx.fillRect(0, DISPLAY_HEIGHT - 12, DISPLAY_WIDTH, 12, TFT_BLACK);
+        gfx.setCursor(4, DISPLAY_HEIGHT - 10);
+        gfx.print("[tap to continue]");
+        gfx.endWrite();
+        waitForTapRelease();
+    }
+    else
+    {
+        Serial.println("title screen assets missing/failed to load, skipping");
+    }
+
+    free(splash);
+    free(logo);
 }
 
 // Interprets a hand-picked subset of m0.script -- the intro cutscene,
@@ -1939,6 +2101,8 @@ void setup()
     setupOTA(); // best-effort; game runs offline if this doesn't connect
 
     loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
+
+    showTitleScreen(); // best-effort; see its comment -- missing assets skip straight to the menu
 
     drawMenu();
 }
