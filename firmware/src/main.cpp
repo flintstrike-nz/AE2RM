@@ -1,13 +1,16 @@
-// AE2RM ESP32 port -- milestone 14: single-player vs. a basic AI, plus
+// AE2RM ESP32 port -- milestone 15: single-player vs. a basic AI, plus
 // m0's mission-script intro cutscene.
 //
 // Boots to a mission menu (m0.aem-m7.aem, showing each map's real title
 // when /strings.dat loaded -- see loadStrings() -- else a generic
-// "Mission N" label). Tap one to play: you are always blue, the computer
-// is always red. m0 additionally runs its mission-script's intro cutscene
-// once at mission start (see runIntroScript()) before handing control to
-// you -- real dialog text, a couple of scripted unit moves/removals, and
-// camera pans; the other 7 maps start playable immediately. Tap a unit
+// "Mission N" label). Tap one to play: a full-screen briefing card (title
+// + objective text, see showMissionBriefing()) shows first for every
+// mission, tap to start. You are always blue, the computer is always red.
+// m0 additionally runs its mission-script's intro cutscene once at
+// mission start, after the briefing (see runIntroScript()) before handing
+// control to you -- real dialog text, a couple of scripted unit
+// moves/removals, and camera pans; the other 7 maps start playable
+// immediately after their briefing. Tap a unit
 // belonging to the current turn's side to select it -- its movement range
 // highlights cyan (terrain-cost-limited flood fill) and any enemy already
 // in its attack range highlights red. Tap a cyan tile to move there
@@ -19,11 +22,10 @@
 // enemy, else move-and-attack, else retreat if critically low on health,
 // else close the distance -- see aiActUnit()'s comment; not a port of
 // the original's scoring-heuristic AI) and hands back control. A
-// living-unit-count readout next to the
-// turn indicator (blue:red, colors 0/1 only) tracks how the battle
-// stands. Tap any other living unit (an enemy, or one that's already
-// moved) to see its stats instead. A side loses when
-// its king dies -- a simplification of the original's
+// living-unit-count readout next to the turn indicator (blue:red, colors
+// 0/1 only) tracks how the battle stands. Tap any other living unit (an
+// enemy, or one that's already moved) to see its stats instead. A side
+// loses when its king dies -- a simplification of the original's
 // castle-capture-tied defeat condition, see README -- and the win banner
 // has a RETRY button that reloads the same mission directly; tapping
 // anywhere else on the banner, or the always-available MENU button,
@@ -735,6 +737,12 @@ const char *getScriptString(int id)
 constexpr int MENU_ROW_H = 28;
 constexpr int MENU_ROW_TOP = 50;
 
+// Locale string 121+i is mission i's real title (used by both the mission
+// menu and showMissionBriefing()); 129+i is its objective text (see
+// showMissionBriefing()'s comment) -- MainDisplayable.java's
+// getLocaleString(121 + mission)/getSaveInfoString().
+constexpr int MISSION_TITLE_STRING_BASE = 121;
+
 void drawMenu()
 {
     gfx.startWrite();
@@ -747,12 +755,9 @@ void drawMenu()
     gfx.setCursor(20, 30);
     gfx.print("select a mission");
 
-    // Locale string 121+i is mission i's real title (see loadStrings()'s
-    // comment); loadStrings() is called once from setup(), so this is
-    // just a lookup, not a fresh SD read per row. A missing/failed-to-load
-    // strings.dat falls back to a generic "Mission N" label instead of an
-    // empty row.
-    constexpr int MISSION_TITLE_STRING_BASE = 121;
+    // loadStrings() is called once from setup(), so this is just a lookup,
+    // not a fresh SD read per row. A missing/failed-to-load strings.dat
+    // falls back to a generic "Mission N" label instead of an empty row.
     for (int i = 0; i < STORY_MAP_COUNT; ++i)
     {
         int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
@@ -791,35 +796,19 @@ bool readScriptLine(File &f, char *buf, size_t bufSize)
     return true;
 }
 
-// Renders a bottom dialog box with word-wrapped `text` and blocks until the
-// player taps (and releases) the screen. Called synchronously from
-// runIntroScript(), which runs before startGame() hands control back to
-// loop() -- this is the only way to pace the cutscene on input without a
-// per-frame script state machine (out of scope for this milestone; see
-// runIntroScript()'s comment).
-void showScriptDialog(const char *text)
+// Greedy word-wrap of `text` into gfx.print() lines starting at (x,y),
+// gfx already at setTextSize(1) -- good enough for this game's short
+// English dialog/objective strings, not general typesetting. A single
+// word longer than maxChars (doesn't happen in this game's text) just
+// gets hard-split. Stops after maxRows lines even if text remains.
+// Shared by showScriptDialog() and showMissionBriefing() so the wrap
+// logic exists once.
+void drawWrappedText(int x, int y, int maxChars, int maxRows, int lineH, const char *text)
 {
-    constexpr int BOX_H = 70;
-    constexpr int BOX_Y = DISPLAY_HEIGHT - BOX_H;
-    constexpr int PAD = 6;
-    constexpr int CHAR_W = 6; // gfx default font at setTextSize(1)
-    constexpr int LINE_H = 10;
-    const int maxChars = (DISPLAY_WIDTH - 2 * PAD) / CHAR_W;
-
-    gfx.startWrite();
-    gfx.fillRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_BLACK);
-    gfx.drawRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_WHITE);
-    gfx.setTextSize(1);
-    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-
-    // Greedy word-wrap, good enough for these short dialog lines -- not
-    // general typesetting. A single word longer than maxChars (doesn't
-    // happen in this game's English dialog) would just get hard-split.
     int row = 0;
     const char *p = text;
     char lineBuf[64];
-    constexpr int MAX_ROWS = (BOX_H - PAD - LINE_H - 4) / LINE_H; // leaves room for the prompt line
-    while (*p && row < MAX_ROWS)
+    while (*p && row < maxRows)
     {
         int lineLen = 0;
         const char *lastSpace = nullptr;
@@ -838,25 +827,24 @@ void showScriptDialog(const char *text)
             scan = lastSpace + 1;
         }
         lineBuf[lineLen] = '\0';
-        gfx.setCursor(PAD, BOX_Y + PAD + row * LINE_H);
+        gfx.setCursor(x, y + row * lineH);
         gfx.print(lineBuf);
         ++row;
         p = (*scan == '\n') ? scan + 1 : scan;
         while (*p == ' ')
             ++p;
     }
+}
 
-    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
-    gfx.setCursor(PAD, BOX_Y + BOX_H - LINE_H - 2);
-    gfx.print("[tap to continue]");
-    gfx.endWrite();
-
-    // ArduinoOTA.handle() is normally only serviced from loop() -- this
-    // blocking wait has to call it itself, or leaving a dialog open would
-    // make the board unreachable over OTA for as long as the player
-    // doesn't tap. Bailing out on otaInProgress (rather than continuing to
-    // poll touch/redraw) matches loop()'s own rule of leaving the
-    // display/SD alone once a flash write has actually started.
+// Blocks until the player taps and releases the screen. ArduinoOTA.handle()
+// is normally only serviced from loop() -- this blocking wait has to call
+// it itself, or leaving a modal screen open would make the board
+// unreachable over OTA for as long as the player doesn't tap. Bailing out
+// on otaInProgress (rather than continuing to poll touch) matches loop()'s
+// own rule of leaving the display/SD alone once a flash write has started.
+// Shared by showScriptDialog() and showMissionBriefing().
+void waitForTapRelease()
+{
     bool wasDown = false;
     for (;;)
     {
@@ -870,6 +858,85 @@ void showScriptDialog(const char *text)
         wasDown = down;
         delay(16);
     }
+}
+
+// Renders a bottom dialog box with word-wrapped `text` and blocks until the
+// player taps (and releases) the screen. Called synchronously from
+// runIntroScript(), which runs before startGame() hands control back to
+// loop() -- this is the only way to pace the cutscene on input without a
+// per-frame script state machine (out of scope for this milestone; see
+// runIntroScript()'s comment).
+void showScriptDialog(const char *text)
+{
+    constexpr int BOX_H = 70;
+    constexpr int BOX_Y = DISPLAY_HEIGHT - BOX_H;
+    constexpr int PAD = 6;
+    constexpr int CHAR_W = 6; // gfx default font at setTextSize(1)
+    constexpr int LINE_H = 10;
+    constexpr int MAX_ROWS = (BOX_H - PAD - LINE_H - 4) / LINE_H; // leaves room for the prompt line
+    const int maxChars = (DISPLAY_WIDTH - 2 * PAD) / CHAR_W;
+
+    gfx.startWrite();
+    gfx.fillRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_BLACK);
+    gfx.drawRect(0, BOX_Y, DISPLAY_WIDTH, BOX_H, TFT_WHITE);
+    gfx.setTextSize(1);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    drawWrappedText(PAD, BOX_Y + PAD, maxChars, MAX_ROWS, LINE_H, text);
+
+    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+    gfx.setCursor(PAD, BOX_Y + BOX_H - LINE_H - 2);
+    gfx.print("[tap to continue]");
+    gfx.endWrite();
+
+    waitForTapRelease();
+}
+
+// A one-time, full-screen "mission briefing" shown right after a map loads
+// (all 8 story maps, not just m0 -- see startGame()): the mission's real
+// title (locale string 121+mapIndex, same as the mission menu row) and its
+// objective text (locale string 129+mapIndex -- getSaveInfoString()'s
+// sibling table in the original, one entry per story map, discovered
+// while wiring up mission titles in an earlier milestone but not read
+// until now). Blocks on tap-to-start, same as a script dialog. Skipped
+// entirely if strings.dat isn't loaded -- there's nothing useful to show,
+// and jumping straight into gameplay is a safe, already-established
+// fallback (see loadStrings()'s comment).
+constexpr int MISSION_OBJECTIVE_STRING_BASE = 129;
+void showMissionBriefing(int mapIndex)
+{
+    if (!scriptStrings)
+        return;
+
+    const char *title = getScriptString(MISSION_TITLE_STRING_BASE + mapIndex);
+    const char *objective = getScriptString(MISSION_OBJECTIVE_STRING_BASE + mapIndex);
+    if (!title[0] && !objective[0])
+        return; // table loaded but neither string present -- nothing to show
+
+    constexpr int PAD = 10;
+    constexpr int CHAR_W = 6;  // gfx default font at setTextSize(1)
+    constexpr int LINE_H = 10;
+    constexpr int TITLE_Y = 40;
+    constexpr int OBJECTIVE_Y = TITLE_Y + 30;
+    constexpr int MAX_ROWS = 6;
+    const int maxChars = (DISPLAY_WIDTH - 2 * PAD) / CHAR_W;
+
+    gfx.startWrite();
+    gfx.fillScreen(TFT_BLACK);
+    gfx.setTextSize(2);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setCursor(PAD, TITLE_Y);
+    gfx.print(title);
+
+    gfx.setTextSize(1);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    drawWrappedText(PAD, OBJECTIVE_Y, maxChars, MAX_ROWS, LINE_H, objective);
+
+    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+    gfx.setCursor(PAD, DISPLAY_HEIGHT - LINE_H - PAD);
+    gfx.print("[tap to start]");
+    gfx.endWrite();
+
+    waitForTapRelease();
 }
 
 // Interprets a hand-picked subset of m0.script -- the intro cutscene,
@@ -1065,6 +1132,8 @@ void startGame(int mapIndex)
     winnerColor = -1;
     viewX = 0;
     viewY = 0;
+
+    showMissionBriefing(mapIndex);
 
     appState = STATE_PLAYING;
     gfx.fillScreen(TFT_BLACK);

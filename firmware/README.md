@@ -1,15 +1,16 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 14**:
+not an automatic conversion — there's no JVM here. This is **milestone 15**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11, 13) — you're always
 blue, the computer is always red, so this is playable single-player — a
 tap-to-inspect unit stat panel, living-unit-count HUD readout, and RETRY
-button on the win/loss banner (milestones 9, 12, 14), and `m0`'s intro
-cutscene, the first piece of the original's scripted mission events to be
-ported (milestone 10; see "Mission-script interpreter" below for exactly
-how much of the format that covers).
+button on the win/loss banner (milestones 9, 12, 14), a full-screen mission
+briefing before every mission (milestone 15), and `m0`'s intro cutscene,
+the first piece of the original's scripted mission events to be ported
+(milestone 10; see "Mission-script interpreter" below for exactly how much
+of the format that covers).
 
 ## Target hardware
 
@@ -173,6 +174,18 @@ not yet confirmed on-device.
   red units in their map data (see above), so those two missions can
   never trigger the king-death win condition -- without an unconditional
   way out, playing one would permanently strand you in STATE_PLAYING.
+- Mission briefing (`showMissionBriefing()` in `main.cpp`, new this
+  milestone): right after a map loads -- all 8 story maps, not just
+  `m0` -- a full-screen title-and-objective card shows before handing
+  control to the player (or, for `m0`, before its intro cutscene runs).
+  The objective text is locale string 129+mapIndex, one entry per story
+  map -- `getSaveInfoString()`'s sibling table in the original
+  (`PaintableObject.getLocaleString()`), discovered while wiring up
+  mission titles in an earlier milestone but not read until now. Skipped
+  entirely (straight into gameplay) if `strings.dat` isn't loaded, same
+  fallback as the mission menu's generic titles. Shares its word-wrap
+  and tap-to-continue logic (`drawWrappedText()`/`waitForTapRelease()`)
+  with `showScriptDialog()` below rather than duplicating it.
 - Mission-script interpreter (`runIntroScript()` in `main.cpp`, new this
   milestone): `m0.script` is the only mission-script file in the source
   archive (a real cutscene/dialog language -- `MainDisplayable.java`

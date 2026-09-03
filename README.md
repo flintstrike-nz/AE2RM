@@ -54,6 +54,8 @@ the full pinout and hardware details.
   units are still alive, next to the turn indicator
 - **A RETRY button** on the win/loss banner: reload the same mission
   right away instead of going back through the mission menu
+- **A mission briefing** before every mission: a full-screen card
+  showing its real title and objective text, tap to start
 - **Real mission titles**, and **`m0`'s intro cutscene**: the original's
   localized string table (`lang.dat`) is now read for mission-menu
   labels and for actual English dialog text, and a small interpreter
@@ -117,6 +119,9 @@ history.
     before falling back to the weakest-target rule
 14. [RETRY button](https://github.com/hayden-flintoft/AE2RM/pull/14) —
     the win/loss banner can reload the same mission directly
+15. [Mission briefing](https://github.com/hayden-flintoft/AE2RM/pull/15)
+    — a full-screen title-and-objective card before every mission,
+    using locale strings discovered but unused since milestone 10
 
 **Planned, not yet started (no fixed order):**
 
