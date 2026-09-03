@@ -72,13 +72,19 @@ not yet confirmed on-device.
   target instead of a move. Damage follows the core of the original's
   `Unit.attackUnit()`: a random roll in `[offenceMin, offenceMax)` against
   the defender's `UNIT_DEFENCE` plus `TERRAIN_DEFENCE_BONUS` for the tile
-  it's standing on, scaled by the attacker's current health% — but
-  **without** the original's per-property matchup bonuses (mounted vs.
-  ground, golem vs. skeleton, water/swamp bonuses, etc.). These depend on
-  the same `UNIT_PROPERTIES` bit flags milestone 5 reads for capture
-  eligibility (below) -- the bits combat would need are just not
-  interpreted here; only the capture-related ones are. A surviving
-  defender counterattacks if adjacent (`Unit.canPerformCloseAttack()`:
+  it's standing on, scaled by the attacker's current health%. The
+  original's per-matchup bonuses from
+  `Unit.getOffenceBonusAgainstUnitEx()` /
+  `getDefenceBonusAgainstUnitEx()` are ported (`matchupOffenceBonus()` /
+  `matchupDefenceBonus()` in `main.cpp`): **archer vs. flyer +15**
+  (property bit 6 vs. bit 0), **wisp vs. skeleton +15**, **lizard
+  attacking from water +10 / defending on water +15** (property bit 1),
+  and **the temple tile (index 34) +25 offence / +15 defence** for
+  whoever stands on it. The `wouldGuaranteeKill()` predictor the AI uses
+  applies the same bonuses so it doesn't misjudge a kill. Still not
+  ported: any `offenceBonus`/`defenceBonus` per-unit fields (0 in this
+  data). A surviving defender counterattacks if adjacent
+  (`Unit.canPerformCloseAttack()`:
   melee-only, and only if the defender's own `MIN_ATTACK_RANGE` is 1 --
   the catapult, for example, can never counterattack). A unit at 0 health
   is removed. Damaged units show a small health bar. This is "move OR
