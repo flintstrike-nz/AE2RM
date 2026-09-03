@@ -179,10 +179,14 @@ not yet confirmed on-device.
   (`UNIT_PROPERTIES` in `main.cpp`) -- soldier and king can capture
   villages, but **only the king can capture a castle**, matching the
   source data (no other unit has that property bit set).
-- Win condition: a side loses when its king dies in combat. This is a
-  simplification of the original, which ties defeat more to castle
-  capture/`fractionKings` bookkeeping this milestone doesn't track --
-  king death is the clearest single condition to key off without it. The
+- Win condition: a side loses when its king dies in combat, **or** when it
+  has no units left at all -- `checkEndConditions()`, run after every
+  combat exchange and every turn, so clearing the last enemy (king or
+  not) ends the mission instead of leaving you stuck on a won board. A
+  side that started with zero units (`m4`/`m6` place no red units) is
+  exempt -- its emptiness isn't a defeat. This is a simplification of the
+  original, which ties defeat more to castle capture/`fractionKings`
+  bookkeeping this milestone doesn't track. The
   screen shows a "BLUE/RED WINS" banner with a **RETRY** button that
   reloads the same mission (`currentMapIndex`, set each time
   `startGame()` runs) without a trip through the menu; tapping anywhere
