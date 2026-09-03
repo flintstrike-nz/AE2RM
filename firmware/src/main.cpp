@@ -1,5 +1,6 @@
-// AE2RM ESP32 port -- milestone 16: single-player vs. a basic AI, plus
-// m0's mission-script intro cutscene.
+// AE2RM ESP32 port -- milestone 17: single-player vs. a basic AI, plus
+// m0's mission-script intro cutscene, now including its scripted sprite
+// effects (CreateSpriteAtUnit).
 //
 // Boots to a title screen (the original's own splash/logo art, see
 // showTitleScreen()), tap to continue, then a mission menu (m0.aem-m7.aem,
@@ -1101,6 +1102,46 @@ void showTitleScreen()
     free(logo);
 }
 
+// Plays a numbered sequence of RGB565 frame files (/effects/<prefix>_NN.bin,
+// frameCount files of frameW x frameH each -- see convert_assets.py)
+// centered on pixel (centerPx, centerPy), redrawing the viewport before
+// each frame so pushImage()'s transparent-skip doesn't smear the previous
+// frame into the next. Used by runIntroScript() for m0's CreateSpriteAtUnit
+// commands (RedSpark/Spark/Smoke) -- unlike playHitEffect()'s per-frame
+// buffer (cached across many combat hits a turn), frames here are loaded
+// fresh and freed immediately: this only ever runs a handful of times
+// total, once per mission start, so there's nothing worth caching.
+void playCutsceneSpriteEffect(int centerPx, int centerPy, const char *prefix, int frameW, int frameH, int frameCount, unsigned long frameDelayMs)
+{
+    size_t frameBytes = (size_t)frameW * frameH * sizeof(uint16_t);
+    uint16_t *frame = static_cast<uint16_t *>(malloc(frameBytes));
+    int px = centerPx - frameW / 2;
+    int py = centerPy - frameH / 2;
+
+    for (int i = 0; i < frameCount; ++i)
+    {
+        bool ok = false;
+        if (frame)
+        {
+            char path[40];
+            snprintf(path, sizeof(path), "/effects/%s_%02d.bin", prefix, i);
+            File f = SD_MMC.open(path, FILE_READ);
+            ok = f && f.read(reinterpret_cast<uint8_t *>(frame), frameBytes) == frameBytes;
+            if (f)
+                f.close();
+        }
+        drawViewport();
+        if (ok)
+        {
+            gfx.startWrite();
+            gfx.pushImage(px, py, frameW, frameH, frame, TRANSPARENT_565);
+            gfx.endWrite();
+        }
+        delay(frameDelayMs);
+    }
+    free(frame);
+}
+
 // Interprets a hand-picked subset of m0.script -- the intro cutscene,
 // @Case 0 through @Case 13 (ending at "StartPlay") -- and stops there.
 // @Case 14 onward drives the rest of the mission's tutorial hints
@@ -1115,11 +1156,11 @@ void showTitleScreen()
 // Runs synchronously (blocking) right after startGame() first draws the
 // map -- not the original's real-time script VM, which runs the *whole*
 // mission this way, this port doesn't attempt. Commands with no equivalent
-// in this port (no fade/cursor-sprite/particle system, no per-tile
-// movement animation to pace) are silently skipped, not simulated:
-// ShowMapName, NextState, SetFadeEnabled, SetFadeValue, SetCursorVisible,
+// in this port (no fade/cursor-sprite system, no per-tile movement
+// animation to pace) are silently skipped, not simulated: ShowMapName,
+// NextState, SetFadeEnabled, SetFadeValue, SetCursorVisible,
 // SetMapStepMax, SetUnitSpeed, Vibrate, ScheduleUnitAnimationStop,
-// CreateSpriteAtUnit, StartPlay.
+// StartPlay.
 void runIntroScript()
 {
     // 224 is the highest ShowDialog string index this case range uses
@@ -1232,6 +1273,46 @@ void runIntroScript()
         {
             if (scriptUnit >= 0)
                 units[scriptUnit].alive = false;
+        }
+        else if (!strcmp(tok[0], "CreateSpriteAtUnit") && n >= 6 && scriptUnit >= 0)
+        {
+            // Args are (name, sx, sy, bounceMode, delay) --
+            // createSimpleSparkSprite(sprite, unit.currentX, unit.currentY,
+            // sx, sy, bounceMode, delay) in the original: sx/sy are a
+            // pixel offset from the unit's own position, delay is this
+            // effect's per-frame pacing (matches Wait's role elsewhere in
+            // this script). bounceMode isn't modeled -- it selects an
+            // animation variant this port doesn't distinguish, always
+            // playing the sprite's frames forward once.
+            const char *prefix = nullptr;
+            int frameW = 0, frameH = 0, frameCount = 0;
+            if (!strcmp(tok[1], "RedSpark"))
+            {
+                prefix = "redspark";
+                frameW = frameH = 20;
+                frameCount = 6;
+            }
+            else if (!strcmp(tok[1], "Spark"))
+            {
+                prefix = "spark";
+                frameW = frameH = 24;
+                frameCount = 6;
+            }
+            else if (!strcmp(tok[1], "Smoke"))
+            {
+                prefix = "smoke";
+                frameW = 24;
+                frameH = 20;
+                frameCount = 4;
+            }
+            if (prefix)
+            {
+                int sx = atoi(tok[2]), sy = atoi(tok[3]);
+                unsigned long frameDelay = (unsigned long)atoi(tok[5]);
+                int centerPx = units[scriptUnit].tileX * TILE_SIZE - viewX + TILE_SIZE / 2 + sx;
+                int centerPy = units[scriptUnit].tileY * TILE_SIZE - viewY + TILE_SIZE / 2 + sy;
+                playCutsceneSpriteEffect(centerPx, centerPy, prefix, frameW, frameH, frameCount, frameDelay);
+            }
         }
         else if (!strcmp(tok[0], "ShowDialog") && n >= 2)
         {

@@ -1,14 +1,15 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 16**:
+not an automatic conversion — there's no JVM here. This is **milestone 17**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11, 13) — you're always
 blue, the computer is always red, so this is playable single-player — a
 tap-to-inspect unit stat panel, living-unit-count HUD readout, and RETRY
 button on the win/loss banner (milestones 9, 12, 14), a full-screen mission
 briefing before every mission (milestone 15), a title screen and a combat
-hit-flash effect using the original's own art (milestone 16), and `m0`'s
+hit-flash effect using the original's own art (milestone 16), `m0`'s
+scripted sprite effects (`CreateSpriteAtUnit`, milestone 17), and `m0`'s
 intro cutscene, the first piece of the original's scripted mission events
 to be ported (milestone 10; see "Mission-script interpreter" below for
 exactly how much of the format that covers).
@@ -101,6 +102,20 @@ not yet confirmed on-device.
   the background before every frame, the previous frame's opaque pixels
   would smear into the next -- unverified on real hardware whether that
   redraw-per-frame cost makes the animation feel too slow.
+- `m0`'s scripted sprite effects (`playCutsceneSpriteEffect()` in
+  `main.cpp`, new this milestone): `runIntroScript()` now handles the
+  intro's `CreateSpriteAtUnit` commands for real, instead of silently
+  skipping them. Same idea as the hit-flash above -- a numbered sequence
+  of converted frames, redrawing the viewport before each one -- but
+  reused for `RedSpark`/`Spark`/`Smoke` (`spark.png`/`smoke.png`,
+  converted the same per-frame way as `redspark.png`), positioned from
+  the scripted unit's tile plus the command's own pixel offset. Unlike
+  `playHitEffect()`'s statically cached frame buffer (loaded once, reused
+  on every combat hit all game), this loads and frees its buffer per
+  call -- the intro script only triggers a handful of these total, so
+  there's nothing worth keeping cached. `bounceMode` (the command's 4th
+  argument) isn't modeled -- it selects an animation variant this port
+  doesn't distinguish, always playing frames forward once.
 - Basic AI (`aiActUnit()` in `main.cpp`): color 1 (red) is always the
   computer, color 0 (blue) is always you -- there's no way to flip this,
   and the two-human hotseat mode from earlier milestones no longer
@@ -236,13 +251,16 @@ not yet confirmed on-device.
   (`MoveMapAndCursor`, a jump cut instead of a smooth pan), and shows four
   real dialog lines with the original's actual English text
   (`ShowDialog`, looked up from `/strings.dat` -- see below -- rendered
-  in a bottom text box, blocking on a tap to continue). Every other
+  in a bottom text box, blocking on a tap to continue), and plays its
+  scripted sprite effects (`CreateSpriteAtUnit`, milestone 17 -- see
+  `playCutsceneSpriteEffect()` above; `RedSpark`/`Spark`/`Smoke` over the
+  named unit's tile, offset by the command's own sx/sy). Every other
   command in that case range (`ShowMapName`, `NextState`,
   `SetFadeEnabled`/`SetFadeValue`, `SetCursorVisible`, `SetMapStepMax`/
-  `SetUnitSpeed`, `Vibrate`, `ScheduleUnitAnimationStop`,
-  `CreateSpriteAtUnit`, `StartPlay`) has no equivalent in this port (no
-  fade/cursor-sprite/particle system, no per-tile movement animation to
-  pace) and is silently skipped, not simulated. Getting the
+  `SetUnitSpeed`, `Vibrate`, `ScheduleUnitAnimationStop`, `StartPlay`) has
+  no equivalent in this port (no fade/cursor-sprite system, no per-tile
+  movement animation to pace) and is silently skipped, not simulated.
+  Getting the
   `GetUnitPlotRoute` argument order right (`x y color destX destY
   animate`, not `color x y destX destY` -- easy to guess wrong from the
   script's own bare integers) was verified by checking it against
