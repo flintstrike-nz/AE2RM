@@ -69,7 +69,12 @@ public:
             cfg.pin_int = PIN_TOUCH_INT;
             cfg.pin_rst = PIN_TOUCH_RST;
             cfg.bus_shared = false;
-            cfg.offset_rotation = 0;
+            // The FT6336 is mounted 180 deg relative to the panel on this
+            // board: with offset_rotation 0 a press in the top-left read
+            // as bottom-right (both axes mirrored). 2 = rotate the touch
+            // coordinates 180 deg to match the display. Verified on
+            // hardware via the TOUCH_DEBUG test screen in main.cpp.
+            cfg.offset_rotation = 2;
             cfg.i2c_port = 0;
             cfg.i2c_addr = 0x38; // FT6336G
             cfg.pin_sda = PIN_TOUCH_SDA;
