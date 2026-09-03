@@ -64,10 +64,12 @@ the full pinout and hardware details.
   labels and for actual English dialog text, and a small interpreter
   runs the opening scene of `m0.script` — the only mission-script file
   in the source archive — repositioning units, removing one scripted
-  casualty, panning the camera, and showing real story dialog before
-  handing control to the player. Only the intro (`@Case 0`-`13`); the
-  rest of the script (tutorial hints and an ending dialog, both gated on
-  live game state) isn't ported yet
+  casualty, panning the camera, playing its scripted sprite effects
+  (`CreateSpriteAtUnit`, using the same combat effect sprites as battle
+  animations above), and showing real story dialog before handing
+  control to the player. Only the intro (`@Case 0`-`13`); the rest of the
+  script (tutorial hints and an ending dialog, both gated on live game
+  state) isn't ported yet
 - **OTA firmware updates** over WiFi, after an initial USB flash
 
 ### What's not there yet
@@ -128,6 +130,10 @@ history.
 16. [Title screen and battle animations](https://github.com/hayden-flintoft/AE2RM/pull/16)
     — the original's splash/logo art at boot, and a spark + damage
     number on every hit, using the original's own combat effect sprite
+17. [`m0`'s scripted sprite effects](https://github.com/hayden-flintoft/AE2RM/pull/17)
+    — the intro cutscene's `CreateSpriteAtUnit` commands now play the
+    original's spark/smoke effects, reusing milestone 16's animation
+    infrastructure instead of silently skipping them
 
 **Planned, not yet started (no fixed order):**
 

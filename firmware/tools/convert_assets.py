@@ -60,6 +60,15 @@ Output layout on the SD card:
                                 (createSimpleSparkSprite() with sprRedSpark
                                 in MainDisplayable.java), played by
                                 main.cpp's playHitEffect() on every hit.
+    /effects/spark_NN.bin       -- 24x24 RGB565, transparent, 6 frames
+                                (NN = 00..05) -- m0's mission-script
+                                CreateSpriteAtUnit Spark effect, played by
+                                main.cpp's runIntroScript() via
+                                playCutsceneSpriteEffect().
+    /effects/smoke_NN.bin       -- 24x20 RGB565, transparent, 4 frames
+                                (NN = 00..03) -- m0's mission-script
+                                CreateSpriteAtUnit Smoke effect, same path
+                                as spark_NN.bin above.
 """
 import os
 import shutil
@@ -114,25 +123,29 @@ def convert_tile(src_png, dst_bin):
     write_raw565(Image.open(src_png).convert("RGB"), dst_bin)
 
 
-REDSPARK_FRAME_SIZE = 20  # redspark.sprite: FrameWidth/Height 20, FrameCount 6
-REDSPARK_FRAME_COUNT = 6
+# Combat/cutscene effect sprites this port plays via playHitEffect()/
+# playCutsceneSpriteEffect() in main.cpp -- name, (FrameWidth, FrameHeight)
+# from each *.sprite file, FrameCount. All three are single-row sheets.
+EFFECT_SPRITES = {
+    "redspark": (20, 20, 6),
+    "spark": (24, 24, 6),
+    "smoke": (24, 20, 4),
+}
 
 
-def convert_redspark(dst_dir):
-    # redspark.png is a 120x20 sheet: 6 frames of 20x20 laid out left to
-    # right in one row. Cropped into one file per frame (matching the
-    # tile/unit-icon convention below) rather than converted as one flat
-    # image -- the firmware loads each frame into a contiguous per-frame
-    # buffer slot, which only works if each frame's bytes are contiguous
-    # in its own file; a single raw conversion of the whole sheet would
-    # interleave all 6 frames' pixels row by row instead.
-    im = Image.open(os.path.join(RES_DIR, "redspark.png")).convert("RGBA")
-    for frame in range(REDSPARK_FRAME_COUNT):
-        box = (
-            frame * REDSPARK_FRAME_SIZE, 0,
-            (frame + 1) * REDSPARK_FRAME_SIZE, REDSPARK_FRAME_SIZE,
-        )
-        dst = os.path.join(dst_dir, f"redspark_{frame:02d}.bin")
+def convert_effect_sprite(name, dst_dir):
+    # Each *.png is a single-row sheet of FrameCount frames side by side.
+    # Cropped into one file per frame (matching the tile/unit-icon
+    # convention below) rather than converted as one flat image -- the
+    # firmware loads each frame into a contiguous per-frame buffer slot,
+    # which only works if each frame's bytes are contiguous in its own
+    # file; a single raw conversion of the whole sheet would interleave
+    # all frames' pixels row by row instead.
+    frame_w, frame_h, frame_count = EFFECT_SPRITES[name]
+    im = Image.open(os.path.join(RES_DIR, f"{name}.png")).convert("RGBA")
+    for frame in range(frame_count):
+        box = (frame * frame_w, 0, (frame + 1) * frame_w, frame_h)
+        dst = os.path.join(dst_dir, f"{name}_{frame:02d}.bin")
         write_raw565(im.crop(box), dst, transparent=True)
 
 
@@ -215,12 +228,15 @@ def main():
                  os.path.join(title_out, "logo.bin"), transparent=True)
     print("converted splash.png, logo.png -> title/")
 
-    # Combat hit-flash effect (createSimpleSparkSprite() with sprRedSpark
-    # in MainDisplayable.java).
+    # Combat hit-flash (redspark, createSimpleSparkSprite() with
+    # sprRedSpark) and m0's mission-script CreateSpriteAtUnit effects
+    # (spark, smoke -- see runIntroScript() in main.cpp).
     effects_out = os.path.join(OUT_DIR, "effects")
     os.makedirs(effects_out, exist_ok=True)
-    convert_redspark(effects_out)
-    print(f"converted redspark.png -> effects/redspark_*.bin ({REDSPARK_FRAME_COUNT} frames)")
+    for name in EFFECT_SPRITES:
+        convert_effect_sprite(name, effects_out)
+        frame_count = EFFECT_SPRITES[name][2]
+        print(f"converted {name}.png -> effects/{name}_*.bin ({frame_count} frames)")
 
     scripts_out = os.path.join(OUT_DIR, "scripts")
     os.makedirs(scripts_out, exist_ok=True)
