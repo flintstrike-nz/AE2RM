@@ -2054,6 +2054,7 @@ void handleTap(int screenX, int screenY)
                 pauseMenuOpen = false;
                 selectedUnit = infoUnit = -1;
                 appState = STATE_MENU;
+                showTitleScreen(); // splash + tap, same as boot
                 drawMenu();
                 return;
             }
