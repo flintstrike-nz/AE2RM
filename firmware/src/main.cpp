@@ -678,6 +678,18 @@ void checkEndConditions()
             eliminated[c] = true; // latched -- no coming back via recruitment
     }
 
+    // The human losing its last unit ends the mission immediately -- a
+    // defeat. Whatever's left is an AI-vs-AI fight the player can't
+    // influence or even watch (endTurn()'s hand-off loop has no human
+    // slot to return control to), so don't run it out.
+    if (startingUnits[HUMAN_COLOR] > 0 && alive[HUMAN_COLOR] == 0)
+    {
+        gameOver = true;
+        winnerColor = (sidesLeft == 1) ? lastLeft : -1;
+        Serial.println("game over: human side eliminated -- defeat");
+        return;
+    }
+
     // Nothing to decide on a one-side sandbox map; otherwise the mission
     // ends once at most one side still has units.
     if (sidesStarted < 2 || sidesLeft > 1)
@@ -2242,6 +2254,14 @@ void endTurn()
             break;
     }
 
+    // The human is always an un-eliminated member of the queue when
+    // endTurn() runs (the shop/END-TURN paths and checkEndConditions()
+    // guarantee it), so the lap above lands back on HUMAN_COLOR. Belt and
+    // braces: never leave the player holding an AI side if it somehow
+    // didn't.
+    if (!gameOver && isAiColor(currentTurn))
+        currentTurn = HUMAN_COLOR;
+
     drawViewport();
 }
 
@@ -2596,7 +2616,9 @@ void handleTap(int screenX, int screenY)
     }
 
     int idx = unitIndexAt(mx, my);
-    if (idx >= 0 && units[idx].color == currentTurn && !units[idx].hasMoved)
+    // Only ever selectable as a movable unit if it's the human's and it's
+    // the human's turn -- taps never drive an AI side.
+    if (idx >= 0 && units[idx].color == HUMAN_COLOR && currentTurn == HUMAN_COLOR && !units[idx].hasMoved)
     {
         infoUnit = -1;
         selectedUnit = idx;
@@ -3133,13 +3155,19 @@ void drawViewport()
 
     if (gameOver)
     {
-        bool draw = winnerColor < 0 || winnerColor >= MAX_PLAYERS;
-        uint16_t winColor = draw ? TFT_WHITE : PLAYER_HUD_COLOR[winnerColor];
+        bool noWinner = winnerColor < 0 || winnerColor >= MAX_PLAYERS;
+        uint16_t winColor = noWinner ? TFT_WHITE : PLAYER_HUD_COLOR[winnerColor];
+        bool humanAlive = false;
+        for (int i = 0; i < unitCount; ++i)
+            if (units[i].alive && units[i].color == HUMAN_COLOR)
+                humanAlive = true;
         char banner[20];
-        if (draw)
-            strcpy(banner, "DRAW");
-        else
+        if (!noWinner)
             snprintf(banner, sizeof(banner), "%s WINS", PLAYER_NAME[winnerColor]);
+        else if (startingUnits[HUMAN_COLOR] > 0 && !humanAlive)
+            strcpy(banner, "DEFEAT"); // human wiped out, 2+ sides still standing
+        else
+            strcpy(banner, "DRAW"); // every side fell in the same exchange
         gfx.fillRect(0, BANNER_Y, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
         gfx.drawFastHLine(0, BANNER_Y, DISPLAY_WIDTH, winColor);
         gfx.drawFastHLine(0, BANNER_Y + BANNER_H - 1, DISPLAY_WIDTH, winColor);
