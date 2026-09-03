@@ -1292,14 +1292,16 @@ void tickCutsceneEffects(unsigned long elapsedMs)
             continue;
         char path[40];
         snprintf(path, sizeof(path), "/effects/%s_%02d.bin", e.prefix, e.currentFrame);
-        File f = SD_MMC.open(path, FILE_READ);
+        File f = openAsset(path); // SD or the embedded copy -- works card-less
         bool ok = f && f.read(reinterpret_cast<uint8_t *>(frame), frameBytes) == frameBytes;
         if (f)
             f.close();
         if (ok)
         {
             gfx.startWrite();
+            gfx.setClipRect(0, MAP_VIEW_Y, DISPLAY_WIDTH, MAP_VIEW_H); // stay out of the HUD bands
             gfx.pushImage(e.px, e.py, e.frameW, e.frameH, frame, TRANSPARENT_565);
+            gfx.clearClipRect();
             gfx.endWrite();
         }
     }
@@ -1478,8 +1480,8 @@ void runIntroScript()
                 int sxPerTick = atoi(tok[2]), syPerTick = atoi(tok[3]);
                 int repeatCount = atoi(tok[4]);
                 unsigned long frameDelay = (unsigned long)atoi(tok[5]);
-                int centerPx = units[scriptUnit].tileX * TILE_SIZE - viewX + TILE_SIZE / 2;
-                int centerPy = units[scriptUnit].tileY * TILE_SIZE - viewY + TILE_SIZE / 2;
+                int centerPx = tileScreenX(units[scriptUnit].tileX) + TILE_SIZE / 2;
+                int centerPy = tileScreenY(units[scriptUnit].tileY) + TILE_SIZE / 2;
                 spawnCutsceneSpriteEffect(centerPx, centerPy, prefix, frameW, frameH, frameCount,
                                            sxPerTick, syPerTick, repeatCount, frameDelay);
             }
@@ -1524,11 +1526,14 @@ void runIntroScript()
 
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to
 // STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
-// across maps and are deliberately NOT reset here.
-// runIntro: play m0's mission-script intro cutscene on this load. False
-// when loadGame() reuses startGame() only to reload terrain -- the
-// cutscene already ran when the saved game was first started.
-void startGame(int mapIndex, bool runIntro = true)
+// across maps and are deliberately NOT reset here. Returns false (and
+// bounces to the mission menu) if the map can't be loaded.
+//
+// interactive: normal mission start -- show the full-screen briefing and,
+// on m0, play the intro cutscene. loadGame() passes false: it only needs
+// the terrain reloaded before it overwrites the live state, and both
+// mission-start screens already ran when the save was first started.
+bool startGame(int mapIndex, bool interactive = true)
 {
     char path[24];
     snprintf(path, sizeof(path), "/maps/m%d.aem", mapIndex);
@@ -1551,7 +1556,7 @@ void startGame(int mapIndex, bool runIntro = true)
         // that's showing the menu, swallowing the first mission tap.
         appState = STATE_MENU;
         drawMenu();
-        return;
+        return false;
     }
 
     currentMapIndex = mapIndex;
@@ -1583,14 +1588,16 @@ void startGame(int mapIndex, bool runIntro = true)
     viewY = focusY * TILE_SIZE - MAP_VIEW_H / 2;
     clampView();
 
-    showMissionBriefing(mapIndex);
+    if (interactive)
+        showMissionBriefing(mapIndex);
 
     appState = STATE_PLAYING;
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
-    if (mapIndex == 0 && runIntro)
+    if (mapIndex == 0 && interactive)
         runIntroScript(); // only m0 has a mission-script file -- see its comment
+    return true;
 }
 
 void handleMenuTap(int screenX, int screenY)
@@ -2040,14 +2047,20 @@ void handleTap(int screenX, int screenY)
             {
                 if (!hasSavedGame())
                     return; // disabled row -- ignore
+                pauseMenuOpen = false;
                 if (loadGame())
-                    pauseMenuOpen = false;
-                else
                 {
                     drawViewport();
-                    toast("Load failed");
-                    delay(700);
                 }
+                else
+                {
+                    // loadGame() left us at the mission menu on failure.
+                    drawMenu();
+                    toast("Load failed");
+                    delay(900);
+                    drawMenu();
+                }
+                return;
             }
             else // PM_EXIT
             {
@@ -2401,11 +2414,20 @@ bool loadGame()
         b.count < 0 || b.count > MAX_UNITS)
         return false;
 
-    // Reload terrain (no cutscene -- it already ran when this game began),
-    // then overwrite the live state from the snapshot.
-    startGame((int)b.mapIndex, false);
-    if (mapTiles && b.mapCells == (int32_t)((size_t)mapWidth * mapHeight))
-        memcpy(mapTiles, b.tiles, (size_t)b.mapCells); // captured-building ownership
+    // Reload terrain (no briefing/cutscene -- they ran when this game was
+    // first started). If the map won't load, or its size no longer
+    // matches the snapshot (assets changed under an old save), bail
+    // *before* touching live state -- startGame() has already bounced to
+    // the mission menu.
+    if (!startGame((int)b.mapIndex, false)) // already bounced to the menu
+        return false;
+    if (!mapTiles || b.mapCells != (int32_t)((size_t)mapWidth * mapHeight))
+    {
+        appState = STATE_MENU; // caller redraws; don't leave a half-loaded game
+        return false;
+    }
+    memcpy(mapTiles, b.tiles, (size_t)b.mapCells); // captured-building ownership
+
     currentTurn = (int)b.turn;
     playerGold = b.gold;
     unitCount = (int)b.count;

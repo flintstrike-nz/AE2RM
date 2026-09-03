@@ -97,12 +97,18 @@ UNIT_COLORS = ["blue", "red", "green", "black"]  # MainDisplayable.FRACTION_COLO
 
 KING_UNIT_TYPE = 9  # Unit.java: type 9 is the king
 # The king's head is a separate sprite the original overlays on the body
-# (Unit.paintEx(): sprKingHeadIcons[0].paintFrame(kingVariant*2 + frame)).
-# king_head_icons.png is 4 heads across (one per fraction/colour), each
-# 13x12, drawn at body-origin + Translate (7, 0) for the idle frame. Bake
-# that composite straight into the king's body icon per colour.
+# (Unit.paintEx(): sprKingHeadIcons[0].paintFrame(g, kingVariant*2 + frame)).
+#
+# king_head_icons.png is 52x12 -- FOUR 13x12 source columns, one head per
+# fraction colour. The .sprite declares 8 logical frames but its FrameDef
+# table maps them two-per-column (FrameDef 0->col0, 1->col0, 2->col1,
+# 3->col1, ...), and the two frames of a column differ only by a 1px
+# Translate-Y idle bob, not by pixels. So logical frame kingVariant*2
+# (the idle frame, currentFrame == 0) resolves to source column
+# kingVariant -- and our colour index (0 blue, 1 red, 2 green, 3 black)
+# IS kingVariant. Cropping column color_index is the right head.
 KING_HEAD_W, KING_HEAD_H = 13, 12
-KING_HEAD_OFFSET = (7, 0)
+KING_HEAD_OFFSET = (7, 0)  # body-origin + Translate (7, 0) for the idle frame
 
 # Must match TRANSPARENT_565 in firmware/src/main.cpp -- pure magenta, chosen
 # because it doesn't occur in any of this game's sprite art.
