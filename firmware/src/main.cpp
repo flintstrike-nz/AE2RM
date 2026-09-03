@@ -201,12 +201,16 @@ static const uint8_t UNIT_DEFENCE[UNIT_TYPE_COUNT] = {5, 5, 10, 5, 10, 15, 30, 1
 static const uint8_t UNIT_ATTACK_RANGE_MAX[UNIT_TYPE_COUNT] = {1, 2, 1, 1, 1, 1, 1, 4, 1, 1, 1, 0};
 static const uint8_t UNIT_ATTACK_RANGE_MIN[UNIT_TYPE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0};
 
-// Recruitment cost, from each unit's ".unit" file "Cost" line. -1 == not
-// buyable: the king you already have, skeleton/crystall are scripted-only.
-// The shop offers every type with cost > 0 (0..8). The original also gates
-// on a per-mission `allowedUnits` cap this port doesn't read yet.
+// Recruitment cost, verbatim from each unit's ".unit" file "Cost" line.
+// -1 means the source has no price at all (skeleton/crystall -- both
+// scripted-only). The king (index 9) does carry a price in the data (200)
+// but is NOT recruitable here regardless: the shop only ever offers unit
+// types [0, SHOP_BUYABLE_COUNT) -- soldier..wyvern -- so index 9+ is out
+// of range by construction, not by cost. Don't assume "cost > 0" means
+// "buyable". The original also gates on a per-mission `allowedUnits` cap
+// this port doesn't read yet.
 static const int16_t UNIT_COST[UNIT_TYPE_COUNT] = {150, 250, 300, 400, 500, 600, 600, 700, 1000, 200, -1, -1};
-constexpr int SHOP_BUYABLE_COUNT = 9; // types 0..8
+constexpr int SHOP_BUYABLE_COUNT = 9; // recruitable types are exactly [0, 9): soldier..wyvern
 
 // Per-turn income: the original credits +30 for each owned village and
 // +50 for each owned castle at that side's turn start (MainDisplayable
