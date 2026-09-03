@@ -4,9 +4,10 @@
 // tools/convert_assets.py writes src/generated_assets.h (git-ignored) --
 // one concatenated blob plus a path table -- from the same files it lays
 // out for the SD card. When that header is present at build time, the
-// assets are linked into the firmware image (~130 KB of flash) and
-// openEmbeddedAsset() serves them; when it isn't, these functions report
-// "nothing embedded" and the firmware needs the card as before.
+// whole asset tree is linked into the firmware image (~335 KB of flash as
+// of the title screen + cutscene effects -- the 240x320 splash alone is
+// 150 KB) and openEmbeddedAsset() serves them; when it isn't, these
+// functions report "nothing embedded" and the firmware needs the card.
 #pragma once
 
 #include <FS.h>

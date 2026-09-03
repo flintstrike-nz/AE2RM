@@ -78,11 +78,12 @@ static bool assetsReady = false;
 constexpr int TILE_SIZE = 24;
 constexpr int TILE_COUNT = 48;
 
-// On-screen layout: a header band (turn + unit counts) and a footer band
-// (MENU / END TURN buttons, selected-unit stats) frame the map so the HUD
-// never sits on top of terrain or units. The scrollable map viewport is
-// only the strip between them -- every map<->screen conversion offsets the
-// y axis by MAP_VIEW_Y and clamps/clips to MAP_VIEW_H.
+// On-screen layout: a header band (whose turn it is + gold) and a footer
+// band (MENU / SHOP / END TURN buttons, and the selected-unit stats or
+// living-unit tally) frame the map so the HUD never sits on top of
+// terrain or units. The scrollable map viewport is only the strip between
+// them -- every map<->screen conversion offsets the y axis by MAP_VIEW_Y
+// and clamps/clips to MAP_VIEW_H.
 constexpr int HEADER_H = 16;
 constexpr int FOOTER_H = 46;
 constexpr int MAP_VIEW_Y = HEADER_H;
@@ -569,6 +570,15 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 void drawViewport(); // defined below; playHitEffect() redraws between animation frames
 void clampView();    // defined below; playHitEffect() re-centers the camera on off-screen combat
 
+// Scrolls so the *center* of map tile (tx, ty) sits at the center of the
+// map viewport (the strip between the header and footer), then clamps.
+inline void centerViewOnTile(int tx, int ty)
+{
+    viewX = tx * TILE_SIZE + TILE_SIZE / 2 - DISPLAY_WIDTH / 2;
+    viewY = ty * TILE_SIZE + TILE_SIZE / 2 - MAP_VIEW_H / 2;
+    clampView();
+}
+
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
 // victimIdx's defence (base + terrain bonus), scaled by the attacker's
 // current health%. Shared by attackUnit()'s direct hit and its
@@ -640,9 +650,7 @@ void playHitEffect(int unitIdx, int hit)
         // the viewport (the strip between header and footer) on the target
         // instead of silently skipping the effect, so every hit actually
         // gets one, not just combat that happened to already be in view.
-        viewX = u.tileX * TILE_SIZE - DISPLAY_WIDTH / 2;
-        viewY = u.tileY * TILE_SIZE - MAP_VIEW_H / 2;
-        clampView();
+        centerViewOnTile(u.tileX, u.tileY);
         px = tileScreenX(u.tileX);
         py = tileScreenY(u.tileY);
     }
@@ -1426,9 +1434,7 @@ void runIntroScript()
             // Center the viewport on the target tile -- a jump cut, not
             // the original's smooth pan (no per-frame animation loop to
             // pace it against here).
-            viewX = tx * TILE_SIZE - DISPLAY_WIDTH / 2;
-            viewY = ty * TILE_SIZE - MAP_VIEW_H / 2;
-            clampView();
+            centerViewOnTile(tx, ty);
             drawViewport();
         }
         else if (!strcmp(tok[0], "GetUnit") && n >= 3)
@@ -1584,9 +1590,7 @@ bool startGame(int mapIndex, bool interactive = true)
                 break;
         }
     }
-    viewX = focusX * TILE_SIZE - DISPLAY_WIDTH / 2;
-    viewY = focusY * TILE_SIZE - MAP_VIEW_H / 2;
-    clampView();
+    centerViewOnTile(focusX, focusY);
 
     if (interactive)
         showMissionBriefing(mapIndex);
@@ -2054,7 +2058,12 @@ void handleTap(int screenX, int screenY)
                 }
                 else
                 {
-                    // loadGame() left us at the mission menu on failure.
+                    // loadGame() may have failed before touching game
+                    // state (bad magic) or after bouncing to the menu
+                    // (bad map) -- force the menu either way so taps route
+                    // to handleMenuTap(), not handleTap().
+                    appState = STATE_MENU;
+                    selectedUnit = infoUnit = -1;
                     drawMenu();
                     toast("Load failed");
                     delay(900);
@@ -2587,12 +2596,13 @@ void drawViewport()
         if (px <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH ||
             py <= MAP_VIEW_Y - UNIT_ICON_SIZE || py >= MAP_VIEW_Y + MAP_VIEW_H)
             continue;
-        // A unit of the side whose turn it is that has used its action is
-        // done until next turn -- draw it desaturated + dimmed so it reads
-        // as unavailable, without touching the sprite's transparent edges
-        // the way a flat overlay rect would.
+        // A unit that has used its action is done until its side's next
+        // turn (switchTurn() clears hasMoved then) -- draw it desaturated +
+        // dimmed so it reads as unavailable, keyed on hasMoved alone so
+        // your spent units stay greyed through the AI's turn too. Per
+        // pixel, so the sprite's transparent edges are untouched.
         const uint16_t *frame = unitIconFrame(u.color, u.type);
-        if (u.hasMoved && u.color == currentTurn)
+        if (u.hasMoved)
         {
             static uint16_t greyed[UNIT_ICON_SIZE * UNIT_ICON_SIZE];
             desaturateIcon(frame, greyed);
