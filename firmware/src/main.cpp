@@ -32,11 +32,15 @@
 // the original's scoring-heuristic AI) and hands back control.
 //
 // A fixed header/footer frame the map (see drawHud()): the header shows
-// whose turn it is and the player's gold; the footer shows the
-// selected/inspected unit's stats or the living-unit tally, plus MENU
-// (hamburger), SHOP (placeholder) and END TURN (return-arrow) icon
-// buttons. MENU opens an in-mission pause menu -- return / save / load
-// (an NVS snapshot) / exit to title. A mission ends when a side's king
+// whose turn it is and your gold; the footer shows the selected/inspected
+// unit's stats or the living-unit tally, plus MENU (hamburger), SHOP
+// (cart) and END TURN (return-arrow) icon buttons. Each side earns gold
+// at its turn start from the villages (+30) and castles (+50) it owns;
+// the SHOP button (on your turn, if you hold a castle) opens a recruit
+// list -- pick an affordable unit, then tap a green tile next to one of
+// your castles to deploy it. The AI recruits too. MENU opens an
+// in-mission pause menu -- return / save / load (an NVS snapshot) / exit
+// to title. A mission ends when a side's king
 // dies or that side is wiped out entirely (checkEndConditions()) -- a
 // simplification of the original's castle-capture-tied defeat, see
 // README. The win banner has a RETRY button that reloads the same mission
@@ -197,6 +201,23 @@ static const uint8_t UNIT_DEFENCE[UNIT_TYPE_COUNT] = {5, 5, 10, 5, 10, 15, 30, 1
 static const uint8_t UNIT_ATTACK_RANGE_MAX[UNIT_TYPE_COUNT] = {1, 2, 1, 1, 1, 1, 1, 4, 1, 1, 1, 0};
 static const uint8_t UNIT_ATTACK_RANGE_MIN[UNIT_TYPE_COUNT] = {1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 0};
 
+// Recruitment cost, verbatim from each unit's ".unit" file "Cost" line.
+// -1 means the source has no price at all (skeleton/crystall -- both
+// scripted-only). The king (index 9) does carry a price in the data (200)
+// but is NOT recruitable here regardless: the shop only ever offers unit
+// types [0, SHOP_BUYABLE_COUNT) -- soldier..wyvern -- so index 9+ is out
+// of range by construction, not by cost. Don't assume "cost > 0" means
+// "buyable". The original also gates on a per-mission `allowedUnits` cap
+// this port doesn't read yet.
+static const int16_t UNIT_COST[UNIT_TYPE_COUNT] = {150, 250, 300, 400, 500, 600, 600, 700, 1000, 200, -1, -1};
+constexpr int SHOP_BUYABLE_COUNT = 9; // recruitable types are exactly [0, 9): soldier..wyvern
+
+// Per-turn income: the original credits +30 for each owned village and
+// +50 for each owned castle at that side's turn start (MainDisplayable
+// ~6412). Terrain type 8 = village, 9 = castle.
+constexpr int VILLAGE_INCOME = 30;
+constexpr int CASTLE_INCOME = 50;
+
 // Same UNIT_TYPE_COUNT order as above, for the tap-to-inspect stat panel.
 static const char *const UNIT_TYPE_NAMES[UNIT_TYPE_COUNT] = {
     "SOLDIER", "ARCHER", "LIZARD", "WIZARD", "WISP", "SPIDER",
@@ -291,17 +312,20 @@ static int scriptStringCount = 0;
 // 1's turn through the AI synchronously before returning control.
 static int currentTurn = 0;
 
-// Player treasury. Story maps in the original start players at 0 money;
-// this is a placeholder for the not-yet-built shop -- shown in the header
-// (coin + amount) and included in a save, but nothing spends or earns it
-// yet.
-static int32_t playerGold = 0;
+// Treasury per side (0 = blue/human, 1 = red/AI). Story maps start both at
+// 0 in the original; income accrues at each side's turn start from the
+// villages/castles it owns (see grantTurnIncome()). The header shows
+// gold[0]; a save carries both.
+static int32_t gold[2] = {0, 0};
 
-// The in-mission pause menu (hamburger) and the shop placeholder are both
-// modal over the game: while either is open drawViewport() paints it on
-// top and loop()/handleTap() route touches to it, not the map.
+// The in-mission pause menu (hamburger) and the shop are both modal over
+// the game: while either is open drawViewport() paints it on top and
+// loop()/handleTap() route touches to it, not the map. shopBuyType >= 0
+// means the shop list picked a unit and we're now waiting for the player
+// to tap a deploy tile.
 static bool pauseMenuOpen = false;
 static bool shopOpen = false;
+static int shopBuyType = -1;
 
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
 static int viewY = 0;
@@ -577,6 +601,8 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 
 void drawViewport(); // defined below; playHitEffect() redraws between animation frames
 void clampView();    // defined below; playHitEffect() re-centers the camera on off-screen combat
+int ownedCastleCount(int color);              // defined below; used by the AI's recruit step
+bool isShopDeployTile(int x, int y, int color); // defined below; likewise
 
 // Scrolls so the *center* of map tile (tx, ty) sits at the center of the
 // map viewport (the strip between the header and footer), then clamps.
@@ -1610,7 +1636,8 @@ bool startGame(int mapIndex, bool interactive = true)
     winnerColor = -1;
     pauseMenuOpen = false;
     shopOpen = false;
-    playerGold = 0; // story maps start both sides at 0 in the original
+    shopBuyType = -1;
+    gold[0] = gold[1] = 0; // story maps start both sides at 0 in the original
 
     // Start the camera on the human player's king (color 0), like the
     // original does -- several maps place your side well down/right of the
@@ -1946,6 +1973,55 @@ void aiActUnit(int idx)
         attackUnit(idx, postMoveTarget);
 }
 
+// A deliberately blunt AI purchase: once its units have moved, if it owns
+// a castle and can afford something, buy the strongest unit it can pay for
+// (up to a soft army-size cap so it doesn't just spam) and drop it on a
+// tile next to that castle. No unit-mix planning -- see aiActUnit()'s note
+// on why the AI here isn't a port of the original's.
+void aiTryRecruit(int color)
+{
+    if (gameOver || ownedCastleCount(color) == 0 || unitCount >= MAX_UNITS)
+        return;
+    int myUnits = 0;
+    for (int i = 0; i < unitCount; ++i)
+        if (units[i].alive && units[i].color == color)
+            ++myUnits;
+    if (myUnits >= 10)
+        return;
+
+    int buyType = -1;
+    for (int t = SHOP_BUYABLE_COUNT - 1; t >= 0; --t) // priciest first
+        if (UNIT_COST[t] > 0 && gold[color] >= UNIT_COST[t])
+        {
+            buyType = t;
+            break;
+        }
+    if (buyType < 0)
+        return;
+
+    for (int x = 0; x < mapWidth && buyType >= 0; ++x)
+        for (int y = 0; y < mapHeight; ++y)
+        {
+            if (!isShopDeployTile(x, y, color))
+                continue;
+            gold[color] -= UNIT_COST[buyType];
+            UnitPlacement &nu = units[unitCount++];
+            nu.type = (uint8_t)buyType;
+            nu.color = (uint8_t)color;
+            nu.tileX = (int16_t)x;
+            nu.tileY = (int16_t)y;
+            nu.hasMoved = true; // it moves next turn
+            nu.alive = true;
+            nu.health = 100;
+            if (color < 2)
+                startingUnits[color]++;
+            Serial.printf("AI (color %d) recruited type %d at (%d,%d), gold now %ld\n",
+                          color, buyType, x, y, (long)gold[color]);
+            buyType = -1; // done -- one unit per turn
+            break;
+        }
+}
+
 void runAITurn()
 {
     for (int i = 0; i < unitCount; ++i)
@@ -1955,6 +2031,23 @@ void runAITurn()
         if (gameOver) // e.g. this AI unit just killed the human king
             return;
     }
+    aiTryRecruit(currentTurn);
+}
+
+// Villages/castles color `c` owns, as gold: the sum credited at its turn
+// start. buildingFraction() is 1-based (0 = neutral), so ownership is
+// fraction == c + 1.
+int computeIncome(int c)
+{
+    int income = 0;
+    for (int i = 0; i < mapWidth * mapHeight; ++i)
+    {
+        uint8_t t = mapTiles[i];
+        if (!isFractionBuilding(t) || buildingFraction(t) != c + 1)
+            continue;
+        income += (TILE_TERRAIN_TYPE[t] == 9) ? CASTLE_INCOME : VILLAGE_INCOME;
+    }
+    return income;
 }
 
 void switchTurn()
@@ -1966,6 +2059,13 @@ void switchTurn()
             units[i].hasMoved = false;
     }
     selectedUnit = -1;
+
+    int income = computeIncome(currentTurn);
+    if (income > 0)
+    {
+        gold[currentTurn] += income;
+        Serial.printf("turn income: color %d +%d (now %ld)\n", currentTurn, income, (long)gold[currentTurn]);
+    }
 }
 
 void endTurn()
@@ -1994,8 +2094,8 @@ void endTurn()
     drawViewport();
 }
 
-// MENU (hamburger), SHOP (cart, placeholder) and END TURN (return-arrow)
-// are square icon buttons in a row at the footer band's right edge; the
+// MENU (hamburger), SHOP (cart) and END TURN (return-arrow) are square
+// icon buttons in a row at the footer band's right edge; the
 // selected-unit stat panel fills the space to their left. MENU is always
 // available -- a mission whose win condition can't trigger (m4/m6 place
 // no red units, see README) would otherwise trap the player.
@@ -2037,6 +2137,53 @@ constexpr int PM_H = PM_ROWS * PM_ROW_H + PM_PAD * 2;
 constexpr int PM_X = (DISPLAY_WIDTH - PM_W) / 2;
 constexpr int PM_Y = (DISPLAY_HEIGHT - PM_H) / 2;
 
+// Shop unit list (buyable types 0..8, SHOP_BUYABLE_COUNT rows). Shared
+// between drawShop() and handleTap().
+constexpr int SHOP_W = 200;
+constexpr int SHOP_ROW_H = 20;
+constexpr int SHOP_HEAD_H = 22;
+constexpr int SHOP_H = SHOP_HEAD_H + SHOP_BUYABLE_COUNT * SHOP_ROW_H + 6;
+constexpr int SHOP_X = (DISPLAY_WIDTH - SHOP_W) / 2;
+constexpr int SHOP_Y = (DISPLAY_HEIGHT - SHOP_H) / 2;
+
+inline bool isCastleTile(uint8_t tile)
+{
+    return isFractionBuilding(tile) && TILE_TERRAIN_TYPE[tile] == 9;
+}
+
+int ownedCastleCount(int color)
+{
+    int n = 0;
+    for (int i = 0; i < mapWidth * mapHeight; ++i)
+        if (isCastleTile(mapTiles[i]) && buildingFraction(mapTiles[i]) == color + 1)
+            ++n;
+    return n;
+}
+
+// Ground a shop-bought unit can be deployed onto: on the map, unoccupied,
+// passable terrain (no mountain/water/lava), and 4-adjacent to a castle
+// `color` owns.
+bool isShopDeployTile(int x, int y, int color)
+{
+    if (!inMapBounds(x, y) || unitIndexAt(x, y) >= 0)
+        return false;
+    uint8_t here = tileAt(x, y);
+    if (here >= TILE_COUNT)
+        return false;
+    uint8_t tt = TILE_TERRAIN_TYPE[here];
+    if (tt == 4 || tt == 5 || tt == 10) // mountain, water, lava
+        return false;
+    static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+    for (int d = 0; d < 4; ++d)
+    {
+        int nx = x + dx[d], ny = y + dy[d];
+        if (inMapBounds(nx, ny) && isCastleTile(tileAt(nx, ny)) &&
+            buildingFraction(tileAt(nx, ny)) == color + 1)
+            return true;
+    }
+    return false;
+}
+
 // If u just moved onto an enemy/neutral fraction building it's equipped to
 // capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
 // and king for villages, king only for castles), flips its ownership to u's
@@ -2077,7 +2224,52 @@ void handleTap(int screenX, int screenY)
     // Modal layers consume the tap before anything game-side sees it.
     if (shopOpen)
     {
-        shopOpen = false;
+        if (shopBuyType < 0)
+        {
+            // List: tap a row you can afford to pick that unit for deploy.
+            for (int i = 0; i < SHOP_BUYABLE_COUNT; ++i)
+            {
+                int ry = SHOP_Y + SHOP_HEAD_H + i * SHOP_ROW_H;
+                if (!inRect(SHOP_X + 4, ry, SHOP_W - 8, SHOP_ROW_H))
+                    continue;
+                if (gold[0] >= UNIT_COST[i] && unitCount < MAX_UNITS)
+                    shopBuyType = i;
+                drawViewport();
+                return;
+            }
+            shopOpen = false; // tap off the list closes it
+            drawViewport();
+            return;
+        }
+
+        // Deploy: a green tile spawns the unit; anything else cancels back
+        // to the list.
+        if (screenY >= MAP_VIEW_Y && screenY < MAP_VIEW_Y + MAP_VIEW_H)
+        {
+            int mx = (screenX + viewX) / TILE_SIZE;
+            int my = (screenY - MAP_VIEW_Y + viewY) / TILE_SIZE;
+            if (isShopDeployTile(mx, my, 0) && unitCount < MAX_UNITS &&
+                gold[0] >= UNIT_COST[shopBuyType])
+            {
+                gold[0] -= UNIT_COST[shopBuyType];
+                UnitPlacement &nu = units[unitCount++];
+                nu.type = (uint8_t)shopBuyType;
+                nu.color = 0;
+                nu.tileX = (int16_t)mx;
+                nu.tileY = (int16_t)my;
+                nu.hasMoved = false; // usable this turn, like the original
+                nu.alive = true;
+                nu.health = 100;
+                Serial.printf("recruited type %d at (%d,%d) for %d, gold now %ld\n",
+                              shopBuyType, mx, my, UNIT_COST[shopBuyType], (long)gold[0]);
+                startingUnits[0]++; // it's now part of blue's roster
+                shopOpen = false;
+                shopBuyType = -1;
+                drawViewport();
+                return;
+            }
+        }
+        shopBuyType = -1; // back to the list
         drawViewport();
         return;
     }
@@ -2150,7 +2342,18 @@ void handleTap(int screenX, int screenY)
     if (inRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN))
     {
         selectedUnit = infoUnit = -1;
-        shopOpen = true;
+        // Recruiting needs your turn and a castle to deploy next to.
+        if (currentTurn == 0 && !gameOver && ownedCastleCount(0) > 0)
+        {
+            shopOpen = true;
+            shopBuyType = -1;
+        }
+        else
+        {
+            drawViewport();
+            toast(gameOver ? "Mission over" : currentTurn != 0 ? "Not your turn" : "Need a castle to recruit");
+            delay(800);
+        }
         drawViewport();
         return;
     }
@@ -2311,7 +2514,7 @@ void drawHud()
     gfx.print(currentTurn == 0 ? "YOUR TURN" : "ENEMY TURN");
 
     char goldStr[12];
-    snprintf(goldStr, sizeof(goldStr), "%ld", (long)playerGold);
+    snprintf(goldStr, sizeof(goldStr), "%ld", (long)gold[0]);
     int goldTextX = DISPLAY_WIDTH - 4 - (int)strlen(goldStr) * 6;
     drawCoin(goldTextX - 8, 7);
     gfx.setTextColor(GOLD_COLOR, BAND_BG);
@@ -2332,15 +2535,17 @@ void drawHud()
             gfx.fillRect(bx, MENU_BTN_Y + 8 + k * 6, bw, 3, TFT_WHITE);
     }
 
-    gfx.fillRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_DARKGREY);
-    gfx.drawRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_WHITE);
+    bool shopReady = currentTurn == 0 && !gameOver && ownedCastleCount(0) > 0;
+    uint16_t cartColor = shopReady ? GOLD_COLOR : 0x7BEF;
+    gfx.fillRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_DARKGREY : 0x2104);
+    gfx.drawRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_WHITE : 0x7BEF);
     {
         // Shopping cart: basket outline, angled handle, two wheels.
         int cx = SHOP_BTN_X + ICON_BTN / 2, cy = SHOP_BTN_Y + ICON_BTN / 2;
-        gfx.drawRect(cx - 6, cy - 4, 13, 9, GOLD_COLOR);
-        gfx.drawLine(cx - 6, cy - 4, cx - 10, cy - 8, GOLD_COLOR);
-        gfx.fillCircle(cx - 3, cy + 8, 2, GOLD_COLOR);
-        gfx.fillCircle(cx + 4, cy + 8, 2, GOLD_COLOR);
+        gfx.drawRect(cx - 6, cy - 4, 13, 9, cartColor);
+        gfx.drawLine(cx - 6, cy - 4, cx - 10, cy - 8, cartColor);
+        gfx.fillCircle(cx - 3, cy + 8, 2, cartColor);
+        gfx.fillCircle(cx + 4, cy + 8, 2, cartColor);
     }
 
     gfx.fillRoundRect(HUD_BTN_X, HUD_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_DARKGREEN);
@@ -2409,7 +2614,7 @@ struct SaveBlob
     uint32_t magic;
     int32_t mapIndex;
     int32_t turn;
-    int32_t gold;
+    int32_t gold[2];
     int32_t viewX, viewY;
     int32_t count;
     int32_t mapCells; // mapWidth*mapHeight, must match on load
@@ -2419,7 +2624,7 @@ struct SaveBlob
     UnitPlacement units[MAX_UNITS];
     uint8_t tiles[SAVE_MAX_TILES];
 };
-constexpr uint32_t SAVE_MAGIC = 0x41453203; // "AE2", format 3 (added starting roster)
+constexpr uint32_t SAVE_MAGIC = 0x41453204; // "AE2", format 4 (per-side gold)
 
 bool hasSavedGame()
 {
@@ -2444,7 +2649,8 @@ bool saveGame()
     b.magic = SAVE_MAGIC;
     b.mapIndex = currentMapIndex;
     b.turn = currentTurn;
-    b.gold = playerGold;
+    b.gold[0] = gold[0];
+    b.gold[1] = gold[1];
     b.viewX = viewX;
     b.viewY = viewY;
     b.count = unitCount;
@@ -2493,7 +2699,8 @@ bool loadGame()
     memcpy(mapTiles, b.tiles, (size_t)b.mapCells); // captured-building ownership
 
     currentTurn = (int)b.turn;
-    playerGold = b.gold;
+    gold[0] = b.gold[0];
+    gold[1] = b.gold[1];
     unitCount = (int)b.count;
     memcpy(units, b.units, sizeof(units));
     startingUnits[0] = b.startUnits[0];
@@ -2501,6 +2708,8 @@ bool loadGame()
     gameOver = b.over != 0;
     winnerColor = b.winner;
     selectedUnit = infoUnit = -1;
+    shopOpen = false;
+    shopBuyType = -1;
     viewX = b.viewX;
     viewY = b.viewY;
     clampView();
@@ -2538,23 +2747,68 @@ void drawPauseMenu()
     }
 }
 
-void drawShopNotice()
+// The shop overlay. Two modes:
+//  - list (shopBuyType < 0): a panel of the buyable unit types + cost,
+//    greyed if you can't afford it or the unit array is full.
+//  - deploy (shopBuyType >= 0): the map (already drawn by drawViewport)
+//    with every valid deploy tile outlined green and a hint in the footer.
+constexpr uint16_t SHOP_BG = 0x2945;
+void drawShop()
 {
-    constexpr int W = 180, H = 70;
-    int x = (DISPLAY_WIDTH - W) / 2, y = (DISPLAY_HEIGHT - H) / 2;
-    gfx.fillRoundRect(x, y, W, H, 6, 0x2945);
-    gfx.drawRoundRect(x, y, W, H, 6, GOLD_COLOR);
-    gfx.setTextSize(2);
-    gfx.setTextColor(GOLD_COLOR, 0x2945);
-    gfx.setCursor(x + 60, y + 10);
-    gfx.print("SHOP");
     gfx.setTextSize(1);
-    gfx.setTextColor(TFT_WHITE, 0x2945);
-    gfx.setCursor(x + 40, y + 34);
-    gfx.print("coming soon");
-    gfx.setTextColor(0xAD55, 0x2945);
-    gfx.setCursor(x + 42, y + 50);
-    gfx.print("tap to close");
+
+    if (shopBuyType >= 0)
+    {
+        gfx.setClipRect(0, MAP_VIEW_Y, DISPLAY_WIDTH, MAP_VIEW_H);
+        int firstCol = viewX / TILE_SIZE, firstRow = viewY / TILE_SIZE;
+        for (int c = 0; c <= DISPLAY_WIDTH / TILE_SIZE + 1; ++c)
+            for (int r = 0; r <= MAP_VIEW_H / TILE_SIZE + 1; ++r)
+            {
+                int mx = firstCol + c, my = firstRow + r;
+                if (!isShopDeployTile(mx, my, 0))
+                    continue;
+                int px = tileScreenX(mx), py = tileScreenY(my);
+                gfx.drawRect(px, py, TILE_SIZE, TILE_SIZE, TFT_GREEN);
+                gfx.drawRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, TFT_GREEN);
+            }
+        gfx.clearClipRect();
+
+        gfx.fillRect(0, FOOTER_Y, DISPLAY_WIDTH, FOOTER_H, BAND_BG);
+        gfx.drawFastHLine(0, FOOTER_Y, DISPLAY_WIDTH, BAND_EDGE);
+        gfx.setTextColor(TFT_GREEN, BAND_BG);
+        gfx.setCursor(5, FOOTER_Y + 8);
+        gfx.printf("Deploy %s: tap a green tile", UNIT_TYPE_NAMES[shopBuyType]);
+        gfx.setTextColor(0xAD55, BAND_BG);
+        gfx.setCursor(5, FOOTER_Y + 24);
+        gfx.print("tap anywhere else to cancel");
+        return;
+    }
+
+    gfx.fillRoundRect(SHOP_X, SHOP_Y, SHOP_W, SHOP_H, 6, SHOP_BG);
+    gfx.drawRoundRect(SHOP_X, SHOP_Y, SHOP_W, SHOP_H, 6, GOLD_COLOR);
+    gfx.setTextColor(GOLD_COLOR, SHOP_BG);
+    gfx.setCursor(SHOP_X + 8, SHOP_Y + 7);
+    gfx.print("RECRUIT");
+    char gs[12];
+    snprintf(gs, sizeof(gs), "%ld", (long)gold[0]);
+    int gx = SHOP_X + SHOP_W - 8 - (int)strlen(gs) * 6;
+    drawCoin(gx - 8, SHOP_Y + 11);
+    gfx.setCursor(gx, SHOP_Y + 7);
+    gfx.print(gs);
+
+    for (int i = 0; i < SHOP_BUYABLE_COUNT; ++i)
+    {
+        int ry = SHOP_Y + SHOP_HEAD_H + i * SHOP_ROW_H;
+        bool afford = gold[0] >= UNIT_COST[i] && unitCount < MAX_UNITS;
+        gfx.setTextColor(afford ? TFT_WHITE : 0x7BEF, SHOP_BG);
+        gfx.setCursor(SHOP_X + 10, ry + 6);
+        gfx.print(UNIT_TYPE_NAMES[i]);
+        char cs[8];
+        snprintf(cs, sizeof(cs), "%d", UNIT_COST[i]);
+        gfx.setTextColor(afford ? GOLD_COLOR : 0x7BEF, SHOP_BG);
+        gfx.setCursor(SHOP_X + SHOP_W - 12 - (int)strlen(cs) * 6, ry + 6);
+        gfx.print(cs);
+    }
 }
 
 void drawViewport()
@@ -2711,7 +2965,7 @@ void drawViewport()
     if (pauseMenuOpen)
         drawPauseMenu();
     else if (shopOpen)
-        drawShopNotice();
+        drawShop();
 
     gfx.endWrite();
 }
@@ -3004,9 +3258,11 @@ void loop()
         }
         // The menu has nothing to drag-pan, so only STATE_PLAYING
         // distinguishes a tap from a drag; every menu touch is a tap. A
-        // gesture that begins in the header/footer band, or while a modal
-        // (pause menu / shop) is up, is never a pan -- only a tap.
-        else if (appState == STATE_PLAYING && !pauseMenuOpen && !shopOpen &&
+        // gesture that begins in the header/footer band, or over the pause
+        // menu / shop list, is never a pan. Shop *deploy* mode still pans
+        // so you can reach an off-screen deploy tile.
+        else if (appState == STATE_PLAYING && !pauseMenuOpen &&
+                 !(shopOpen && shopBuyType < 0) &&
                  touchStartY >= MAP_VIEW_Y && touchStartY < MAP_VIEW_Y + MAP_VIEW_H)
         {
             if (!isDrag && (abs(x - touchStartX) > TAP_MOVE_THRESHOLD || abs(y - touchStartY) > TAP_MOVE_THRESHOLD))
