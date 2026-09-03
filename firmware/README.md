@@ -294,6 +294,18 @@ not yet confirmed on-device.
   not internal SRAM -- two caches were already ~110KB as plain static
   arrays (34% of the ~320KB internal RAM budget), and more asset types
   are coming
+- Economy & recruitment (`main.cpp`): each side earns gold at its turn
+  start from the buildings it owns -- **+30 per village, +50 per castle**,
+  matching `MainDisplayable`'s income loop. Story maps start both sides at
+  0. On your turn, if you hold a castle, the **SHOP** (cart) button opens
+  a recruit list -- the nine buyable unit types with their `.unit`-file
+  costs (soldier 150 … wyvern 1000), greyed if you can't afford one or
+  the 64-unit array is full. Pick one, then tap a green-outlined tile
+  (unoccupied, passable, next to one of your castles) to deploy it; the
+  gold is deducted and the unit is usable that turn. The AI recruits the
+  same way -- once its units have moved, it buys the priciest unit it can
+  afford (up to a 10-unit soft cap) and drops it by its castle. Per-side
+  gold is carried in the save (format 4).
 - WiFi + OTA updates (`ArduinoOTA`): flash once over USB, then push
   subsequent builds wirelessly — see "Build & flash" below
 
@@ -303,9 +315,9 @@ The rest of `m0`'s mission-script (`@Case 14` onward -- the Test-gated
 tutorial `ShowHelp` overlays checked against live game state, and the
 `CompleteMission` epilogue dialog; not what's causing `m4`/`m6`'s missing
 red units, see above), the original's actual AI (this milestone's is a
-simple heuristic -- see above), the combat property bonuses noted above,
-any HUD beyond the turn indicator/living-unit counts/END TURN/MENU
-buttons/mission menu/unit stat panel/dialog box, MIDI music (needs its own synth — see
+simple heuristic -- see above), a per-mission `allowedUnits` cap on which
+unit types the shop offers, the combat property bonuses noted above,
+MIDI music (needs its own synth — see
 the "Music" question this was scoped against), and skirmish maps
 (`s0`-`s11`, which would also need a 4-side, non-hardcoded turn queue --
 see the team-color note above). The original `MainDisplayable.java` is
