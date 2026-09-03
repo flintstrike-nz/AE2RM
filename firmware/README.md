@@ -73,8 +73,9 @@ not yet confirmed on-device.
   `Unit.attackUnit()`: a random roll in `[offenceMin, offenceMax)` against
   the defender's `UNIT_DEFENCE` plus `TERRAIN_DEFENCE_BONUS` for the tile
   it's standing on, scaled by the attacker's current health%. The
-  original's per-matchup bonuses from `Unit.getOffenceBonusAgainstUnit()`
-  / `getDefenceBonusAgainstUnit()` are ported (`matchupOffenceBonus()` /
+  original's per-matchup bonuses from
+  `Unit.getOffenceBonusAgainstUnitEx()` /
+  `getDefenceBonusAgainstUnitEx()` are ported (`matchupOffenceBonus()` /
   `matchupDefenceBonus()` in `main.cpp`): **archer vs. flyer +15**
   (property bit 6 vs. bit 0), **wisp vs. skeleton +15**, **lizard
   attacking from water +10 / defending on water +15** (property bit 1),

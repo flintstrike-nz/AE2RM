@@ -226,13 +226,15 @@ static const char *const UNIT_TYPE_NAMES[UNIT_TYPE_COUNT] = {
 };
 
 // Bit flags from each unit's "HasProperty N" lines (UNIT_PROPERTIES[i] =
-// OR of 1<<N for each line). Only the two capture-related bits are used by
-// this milestone: bit 3 (0x08, "can capture a village") is soldier and
-// king; bit 4 (0x10, "can capture a castle") is king only -- no other unit
-// in this tileset can take a castle. The other bits (mounted/flying
-// matchup bonuses, water bonuses, etc.) exist in the source data but
-// aren't read here since milestone 4 didn't port the combat bonuses that
-// use them.
+// OR of 1<<N for each line). Bits read here:
+//   bit 3 (0x08) "can capture a village" -- soldier and king
+//   bit 4 (0x10) "can capture a castle"  -- king only (no other unit in
+//                this tileset has it)
+//   bit 0 (0x01) "flyer"  -- wyvern; the archer's anti-air bonus targets it
+//   bit 1 (0x02) "amphibious" -- lizard; its water offence/defence bonus
+//   bit 6 (0x40) "anti-air"   -- archer; +15 vs. a flyer
+// (see matchupOffenceBonus()/matchupDefenceBonus()). The remaining bits
+// (other matchup flags) exist in the source data but aren't interpreted.
 constexpr uint8_t UNIT_PROPERTY_CAPTURE_VILLAGE = 0x08;
 constexpr uint8_t UNIT_PROPERTY_CAPTURE_CASTLE = 0x10;
 static const uint16_t UNIT_PROPERTIES[UNIT_TYPE_COUNT] = {
