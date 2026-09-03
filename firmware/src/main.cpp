@@ -36,12 +36,13 @@
 // selected/inspected unit's stats or the living-unit tally, plus MENU
 // (hamburger), SHOP (placeholder) and END TURN (return-arrow) icon
 // buttons. MENU opens an in-mission pause menu -- return / save / load
-// (an NVS snapshot) / exit to title. A side loses when its king dies -- a
-// simplification of the original's castle-capture-tied defeat condition,
-// see README -- and the win banner has a RETRY button that reloads the
-// same mission directly; tapping anywhere else on the banner returns to
-// the mission menu. Drag pans the camera during a mission. See
-// firmware/README.md for what's implemented and what's next.
+// (an NVS snapshot) / exit to title. A mission ends when a side's king
+// dies or that side is wiped out entirely (checkEndConditions()) -- a
+// simplification of the original's castle-capture-tied defeat, see
+// README. The win banner has a RETRY button that reloads the same mission
+// directly; tapping anywhere else on the banner returns to the mission
+// menu. Drag pans the camera during a mission. See firmware/README.md for
+// what's implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
@@ -242,6 +243,13 @@ inline uint8_t setBuildingFraction(uint8_t tile, int fraction)
 
 static bool gameOver = false;
 static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
+
+// Living-unit count each side had once the mission was fully set up
+// (after any m0 intro-script removals). A side is defeated when it drops
+// to zero -- but only if it started with some: m4/m6 place no red units
+// at all (see README), and a side that was never in the fight isn't a
+// loser. Set at the end of startGame(); carried in a save.
+static int startingUnits[2] = {0, 0};
 
 // The mission startGame() most recently loaded (m<currentMapIndex>.aem),
 // or -1 before any mission has loaded. Only used by the win/loss banner's
@@ -579,6 +587,34 @@ inline void centerViewOnTile(int tx, int ty)
     clampView();
 }
 
+// Ends the mission the moment one side has no units left. King death is a
+// faster, separate instant-win kept in resolveHit() (killing the king
+// ends it even with other enemy units still standing -- the documented
+// simplification of the original's castle-capture-tied defeat). This
+// catches every other finish -- clearing the last non-king enemy, or
+// losing your own last unit -- which nothing checked before, so the
+// player was left stuck on a won board with no banner and no way to end
+// the mission. A no-op once gameOver is set; call after any combat
+// exchange and after each turn resolves.
+void checkEndConditions()
+{
+    if (gameOver)
+        return;
+    int alive[2] = {0, 0};
+    for (int i = 0; i < unitCount; ++i)
+        if (units[i].alive && units[i].color < 2)
+            alive[units[i].color]++;
+
+    bool blueOut = startingUnits[0] > 0 && alive[0] == 0;
+    bool redOut = startingUnits[1] > 0 && alive[1] == 0;
+    if (!blueOut && !redOut)
+        return;
+
+    gameOver = true;
+    winnerColor = blueOut ? 1 : 0; // both-out (shouldn't happen) -> the AI side
+    Serial.printf("game over: color %d wins (opponent eliminated)\n", winnerColor);
+}
+
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
 // victimIdx's defence (base + terrain bonus), scaled by the attacker's
 // current health%. Shared by attackUnit()'s direct hit and its
@@ -739,6 +775,7 @@ void attackUnit(int attackerIdx, int victimIdx)
         int counterHit = resolveHit(victimIdx, attackerIdx);
         playHitEffect(attackerIdx, counterHit);
     }
+    checkEndConditions();
 }
 
 // Flood-fills how far `u` could move this turn, terrain-cost-limited by
@@ -1601,6 +1638,13 @@ bool startGame(int mapIndex, bool interactive = true)
 
     if (mapIndex == 0 && interactive)
         runIntroScript(); // only m0 has a mission-script file -- see its comment
+
+    // Record the roster the mission actually starts from -- after any
+    // intro-script unit removals -- for checkEndConditions().
+    startingUnits[0] = startingUnits[1] = 0;
+    for (int i = 0; i < unitCount; ++i)
+        if (units[i].alive && units[i].color < 2)
+            startingUnits[units[i].color]++;
     return true;
 }
 
@@ -1926,12 +1970,20 @@ void switchTurn()
 
 void endTurn()
 {
+    checkEndConditions(); // the player may have cleared the board on this turn
+    if (gameOver)
+    {
+        drawViewport();
+        return;
+    }
+
     switchTurn();
     Serial.printf("turn: %s\n", currentTurn == 0 ? "blue" : "red");
 
     if (currentTurn == AI_COLOR && !gameOver)
     {
         runAITurn();
+        checkEndConditions();
         if (!gameOver)
         {
             switchTurn();
@@ -2361,12 +2413,13 @@ struct SaveBlob
     int32_t viewX, viewY;
     int32_t count;
     int32_t mapCells; // mapWidth*mapHeight, must match on load
+    int32_t startUnits[2]; // per-side starting roster, for checkEndConditions()
     uint8_t over;
     int8_t winner;
     UnitPlacement units[MAX_UNITS];
     uint8_t tiles[SAVE_MAX_TILES];
 };
-constexpr uint32_t SAVE_MAGIC = 0x41453202; // "AE2", format 2 (added tile grid)
+constexpr uint32_t SAVE_MAGIC = 0x41453203; // "AE2", format 3 (added starting roster)
 
 bool hasSavedGame()
 {
@@ -2396,6 +2449,8 @@ bool saveGame()
     b.viewY = viewY;
     b.count = unitCount;
     b.mapCells = (int32_t)cells;
+    b.startUnits[0] = startingUnits[0];
+    b.startUnits[1] = startingUnits[1];
     b.over = gameOver ? 1 : 0;
     b.winner = (int8_t)winnerColor;
     memcpy(b.units, units, sizeof(units));
@@ -2441,6 +2496,8 @@ bool loadGame()
     playerGold = b.gold;
     unitCount = (int)b.count;
     memcpy(units, b.units, sizeof(units));
+    startingUnits[0] = b.startUnits[0];
+    startingUnits[1] = b.startUnits[1];
     gameOver = b.over != 0;
     winnerColor = b.winner;
     selectedUnit = infoUnit = -1;
