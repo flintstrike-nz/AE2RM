@@ -499,6 +499,7 @@ bool inAttackRange(const UnitPlacement &attacker, int tx, int ty)
 }
 
 void drawViewport(); // defined below; playHitEffect() redraws between animation frames
+void clampView();    // defined below; playHitEffect() re-centers the camera on off-screen combat
 
 // One hit: attackerIdx's roll in [offenceMin, offenceMax) against
 // victimIdx's defence (base + terrain bonus), scaled by the attacker's
@@ -555,18 +556,27 @@ int resolveHit(int attackerIdx, int victimIdx)
 // Not ported: the original's damage label rises and fades over ~800ms;
 // this just holds it static for the spark's duration, then lets the next
 // drawViewport() clear it -- simpler, and this display has no alpha
-// blending to fade it with anyway. Silently does nothing if unitIdx's
-// tile isn't currently on-screen (its combat should always have been
-// visible when the player initiated it) or if a frame failed to load
-// (e.g. missing from the SD card) -- this is cosmetic, not worth failing
-// an attack over.
+// blending to fade it with anyway. Does nothing if a frame failed to
+// load (e.g. missing from the SD card) -- this is cosmetic, not worth
+// failing an attack over.
 void playHitEffect(int unitIdx, int hit)
 {
     const UnitPlacement &u = units[unitIdx];
     int px = u.tileX * TILE_SIZE - viewX;
     int py = u.tileY * TILE_SIZE - viewY;
     if (px <= -TILE_SIZE || py <= -TILE_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
-        return;
+    {
+        // AI combat happens anywhere on the map -- runAITurn() never
+        // moves the camera -- so this isn't a rare edge case; recenter
+        // the viewport on the target instead of silently skipping the
+        // effect, so every hit actually gets one, not just combat that
+        // happened to already be in view.
+        viewX = u.tileX * TILE_SIZE - DISPLAY_WIDTH / 2;
+        viewY = u.tileY * TILE_SIZE - DISPLAY_HEIGHT / 2;
+        clampView();
+        px = u.tileX * TILE_SIZE - viewX;
+        py = u.tileY * TILE_SIZE - viewY;
+    }
 
     constexpr int SPARK_FRAME_W = 20, SPARK_FRAME_H = 20, SPARK_FRAME_COUNT = 6;
     constexpr size_t FRAME_PIXELS = (size_t)SPARK_FRAME_W * SPARK_FRAME_H;
