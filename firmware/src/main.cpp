@@ -1525,7 +1525,10 @@ void runIntroScript()
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to
 // STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
 // across maps and are deliberately NOT reset here.
-void startGame(int mapIndex)
+// runIntro: play m0's mission-script intro cutscene on this load. False
+// when loadGame() reuses startGame() only to reload terrain -- the
+// cutscene already ran when the saved game was first started.
+void startGame(int mapIndex, bool runIntro = true)
 {
     char path[24];
     snprintf(path, sizeof(path), "/maps/m%d.aem", mapIndex);
@@ -1586,7 +1589,7 @@ void startGame(int mapIndex)
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
-    if (mapIndex == 0)
+    if (mapIndex == 0 && runIntro)
         runIntroScript(); // only m0 has a mission-script file -- see its comment
 }
 
@@ -2320,9 +2323,12 @@ void drawHud()
 
 // --- Save / load ------------------------------------------------------
 // A single NVS slot ("aeii"/"save"): a flat snapshot of the mission in
-// progress, enough to resume a story map exactly. Skirmish state and
-// mission-script progress aren't covered (no skirmish here; m0's cutscene
-// only runs at mission start).
+// progress, enough to resume a story map exactly -- units, turn, gold,
+// camera, AND the live tile grid (so captured villages/castles keep their
+// new owner). Skirmish state and mission-script progress aren't covered
+// (no skirmish here; m0's cutscene only runs at mission start, and
+// loadGame() suppresses it).
+constexpr int SAVE_MAX_TILES = 2048; // every story map is well under this
 struct SaveBlob
 {
     uint32_t magic;
@@ -2331,11 +2337,13 @@ struct SaveBlob
     int32_t gold;
     int32_t viewX, viewY;
     int32_t count;
+    int32_t mapCells; // mapWidth*mapHeight, must match on load
     uint8_t over;
     int8_t winner;
     UnitPlacement units[MAX_UNITS];
+    uint8_t tiles[SAVE_MAX_TILES];
 };
-constexpr uint32_t SAVE_MAGIC = 0x41453201; // "AE2", format 1
+constexpr uint32_t SAVE_MAGIC = 0x41453202; // "AE2", format 2 (added tile grid)
 
 bool hasSavedGame()
 {
@@ -2349,9 +2357,14 @@ bool hasSavedGame()
 
 bool saveGame()
 {
-    if (currentMapIndex < 0)
+    if (currentMapIndex < 0 || !mapTiles)
         return false;
-    SaveBlob b{};
+    size_t cells = (size_t)mapWidth * mapHeight;
+    if (cells == 0 || cells > SAVE_MAX_TILES)
+        return false;
+
+    static SaveBlob b;
+    b = SaveBlob{};
     b.magic = SAVE_MAGIC;
     b.mapIndex = currentMapIndex;
     b.turn = currentTurn;
@@ -2359,9 +2372,11 @@ bool saveGame()
     b.viewX = viewX;
     b.viewY = viewY;
     b.count = unitCount;
+    b.mapCells = (int32_t)cells;
     b.over = gameOver ? 1 : 0;
     b.winner = (int8_t)winnerColor;
     memcpy(b.units, units, sizeof(units));
+    memcpy(b.tiles, mapTiles, cells);
 
     Preferences p;
     if (!p.begin("aeii", false))
@@ -2376,7 +2391,8 @@ bool loadGame()
     Preferences p;
     if (!p.begin("aeii", true))
         return false;
-    SaveBlob b{};
+    static SaveBlob b;
+    b = SaveBlob{};
     size_t n = p.getBytes("save", &b, sizeof(b));
     p.end();
     if (n != sizeof(b) || b.magic != SAVE_MAGIC ||
@@ -2384,7 +2400,11 @@ bool loadGame()
         b.count < 0 || b.count > MAX_UNITS)
         return false;
 
-    startGame((int)b.mapIndex); // reloads terrain + sets STATE_PLAYING
+    // Reload terrain (no cutscene -- it already ran when this game began),
+    // then overwrite the live state from the snapshot.
+    startGame((int)b.mapIndex, false);
+    if (mapTiles && b.mapCells == (int32_t)((size_t)mapWidth * mapHeight))
+        memcpy(mapTiles, b.tiles, (size_t)b.mapCells); // captured-building ownership
     currentTurn = (int)b.turn;
     playerGold = b.gold;
     unitCount = (int)b.count;
