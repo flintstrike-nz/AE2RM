@@ -10,39 +10,45 @@
 // showMissionBriefing()) shows first for every mission, tap to start. You
 // are always blue, the computer is always red. m0 additionally runs its
 // mission-script's intro cutscene once at mission start, after the
-// briefing (see runIntroScript()) before handing control to you -- real
-// dialog text, a couple of scripted unit moves/removals, and camera pans;
-// the other 7 maps start playable immediately after their briefing. Tap a
-// unit belonging to the current turn's side to select it -- its movement
-// range highlights cyan (terrain-cost-limited flood fill) and any enemy
-// already in its attack range highlights red. Tap a cyan tile to move
+// briefing (see runIntroScript()) -- real dialog text, a couple of
+// scripted unit moves/removals, and camera pans; the other 7 maps start
+// playable immediately after their briefing. The camera opens centered on
+// your king. Tap a unit belonging to the current turn's side to select it
+// -- its movement range highlights cyan (terrain-cost-limited flood fill)
+// and every enemy it could attack this turn (from where it stands or
+// after moving within that range) highlights red. Tap a cyan tile to move
 // there (capturing a village/castle you move onto, if this unit type
-// can), tap a red-highlighted enemy to attack it (one action per unit per
-// turn -- this is "move OR attack", not the original's "move then
-// attack"). Every hit -- and the counterattack, if it happens -- plays
-// the original's own spark effect and a damage number over the target
-// (see playHitEffect()), paced so both are actually visible. Tap
+// can), tap a red-highlighted enemy to attack it, stepping into range
+// first if needed (one action per unit per turn: a move, or a
+// move-then-attack, matching the original). A unit that has used its
+// action is greyed out until next turn. Every hit -- and the
+// counterattack, if it happens -- plays the original's own spark effect
+// and a damage number over the target (see playHitEffect()), paced so
+// both are actually visible. Tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
 // (attack a guaranteed kill if one's in range, else the weakest in-range
 // enemy, else move-and-attack, else retreat if critically low on health,
 // else close the distance -- see aiActUnit()'s comment; not a port of
-// the original's scoring-heuristic AI) and hands back control. A
-// living-unit-count readout next to the turn indicator (blue:red, colors
-// 0/1 only) tracks how the battle stands. Tap any other living unit (an
-// enemy, or one that's already moved) to see its stats instead. A side
-// loses when its king dies -- a simplification of the original's
-// castle-capture-tied defeat condition, see README -- and the win banner
-// has a RETRY button that reloads the same mission directly; tapping
-// anywhere else on the banner, or the always-available MENU button,
-// returns to the mission menu. Drag still pans the camera during a
-// mission. See firmware/README.md for what's implemented and what's
-// next.
+// the original's scoring-heuristic AI) and hands back control.
+//
+// A fixed header/footer frame the map (see drawHud()): the header shows
+// whose turn it is and the player's gold; the footer shows the
+// selected/inspected unit's stats or the living-unit tally, plus MENU
+// (hamburger), SHOP (placeholder) and END TURN (return-arrow) icon
+// buttons. MENU opens an in-mission pause menu -- return / save / load
+// (an NVS snapshot) / exit to title. A side loses when its king dies -- a
+// simplification of the original's castle-capture-tied defeat condition,
+// see README -- and the win banner has a RETRY button that reloads the
+// same mission directly; tapping anywhere else on the banner returns to
+// the mission menu. Drag pans the camera during a mission. See
+// firmware/README.md for what's implemented and what's next.
 
 #include <Arduino.h>
 #include <FS.h>
 #include <SD_MMC.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include "LGFX_Config.h"
 #include "board_pins.h"
 #include "embedded_assets.h"
@@ -71,6 +77,23 @@ static bool assetsReady = false;
 
 constexpr int TILE_SIZE = 24;
 constexpr int TILE_COUNT = 48;
+
+// On-screen layout: a header band (turn + unit counts) and a footer band
+// (MENU / END TURN buttons, selected-unit stats) frame the map so the HUD
+// never sits on top of terrain or units. The scrollable map viewport is
+// only the strip between them -- every map<->screen conversion offsets the
+// y axis by MAP_VIEW_Y and clamps/clips to MAP_VIEW_H.
+constexpr int HEADER_H = 16;
+constexpr int FOOTER_H = 46;
+constexpr int MAP_VIEW_Y = HEADER_H;
+constexpr int MAP_VIEW_H = DISPLAY_HEIGHT - HEADER_H - FOOTER_H;
+constexpr int FOOTER_Y = DISPLAY_HEIGHT - FOOTER_H;
+
+// On-device touch calibration aid: when true, boot shows a full-screen
+// crosshair + coordinate readout harness (touchTest()) so a mis-mapped
+// panel is obvious. Left in, off by default, now that offset_rotation is
+// set in LGFX_Config.h.
+constexpr bool TOUCH_DEBUG = false;
 
 // Asset frame caches live in PSRAM, not internal SRAM: two full caches
 // (tiles + unit icons) already used ~110KB of the ~320KB of internal RAM
@@ -259,8 +282,26 @@ static int scriptStringCount = 0;
 // 1's turn through the AI synchronously before returning control.
 static int currentTurn = 0;
 
+// Player treasury. Story maps in the original start players at 0 money;
+// this is a placeholder for the not-yet-built shop -- shown in the header
+// (coin + amount) and included in a save, but nothing spends or earns it
+// yet.
+static int32_t playerGold = 0;
+
+// The in-mission pause menu (hamburger) and the shop placeholder are both
+// modal over the game: while either is open drawViewport() paints it on
+// top and loop()/handleTap() route touches to it, not the map.
+static bool pauseMenuOpen = false;
+static bool shopOpen = false;
+
 static int viewX = 0; // top-left of the viewport, in pixels, into the map
 static int viewY = 0;
+
+// Screen x/y of the top-left of map tile (mx, my), given the current
+// scroll. The y axis is offset by MAP_VIEW_Y so the map draws in the
+// strip between the header and footer, not the whole screen.
+static inline int tileScreenX(int mx) { return mx * TILE_SIZE - viewX; }
+static inline int tileScreenY(int my) { return my * TILE_SIZE - viewY + MAP_VIEW_Y; }
 
 // m0.aem .. m7.aem -- the story maps loadMap()'s hardcoded 2-side turn
 // queue is exact for (see UnitPlacement's comment). Skirmish maps
@@ -589,20 +630,21 @@ int resolveHit(int attackerIdx, int victimIdx)
 void playHitEffect(int unitIdx, int hit)
 {
     const UnitPlacement &u = units[unitIdx];
-    int px = u.tileX * TILE_SIZE - viewX;
-    int py = u.tileY * TILE_SIZE - viewY;
-    if (px <= -TILE_SIZE || py <= -TILE_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
+    int px = tileScreenX(u.tileX);
+    int py = tileScreenY(u.tileY);
+    if (px <= -TILE_SIZE || px >= DISPLAY_WIDTH ||
+        py <= MAP_VIEW_Y - TILE_SIZE || py >= MAP_VIEW_Y + MAP_VIEW_H)
     {
         // AI combat happens anywhere on the map -- runAITurn() never
         // moves the camera -- so this isn't a rare edge case; recenter
-        // the viewport on the target instead of silently skipping the
-        // effect, so every hit actually gets one, not just combat that
-        // happened to already be in view.
+        // the viewport (the strip between header and footer) on the target
+        // instead of silently skipping the effect, so every hit actually
+        // gets one, not just combat that happened to already be in view.
         viewX = u.tileX * TILE_SIZE - DISPLAY_WIDTH / 2;
-        viewY = u.tileY * TILE_SIZE - DISPLAY_HEIGHT / 2;
+        viewY = u.tileY * TILE_SIZE - MAP_VIEW_H / 2;
         clampView();
-        px = u.tileX * TILE_SIZE - viewX;
-        py = u.tileY * TILE_SIZE - viewY;
+        px = tileScreenX(u.tileX);
+        py = tileScreenY(u.tileY);
     }
 
     constexpr int SPARK_FRAME_W = 20, SPARK_FRAME_H = 20, SPARK_FRAME_COUNT = 6;
@@ -634,7 +676,9 @@ void playHitEffect(int unitIdx, int hit)
     snprintf(label, sizeof(label), "-%d", hit);
     int sparkX = px + (TILE_SIZE - SPARK_FRAME_W) / 2;
     int sparkY = py + (TILE_SIZE - SPARK_FRAME_H) / 2;
-    int labelY = py >= 10 ? py - 10 : py + TILE_SIZE; // keep the label on-screen for a unit at the very top row
+    // Keep the damage label inside the map strip (a unit on the top row
+    // would otherwise put it up in the header).
+    int labelY = py >= MAP_VIEW_Y + 10 ? py - 10 : py + TILE_SIZE;
 
     for (int frame = 0; frame < SPARK_FRAME_COUNT; ++frame)
     {
@@ -644,6 +688,7 @@ void playHitEffect(int unitIdx, int hit)
         // into the next.
         drawViewport();
         gfx.startWrite();
+        gfx.setClipRect(0, MAP_VIEW_Y, DISPLAY_WIDTH, MAP_VIEW_H); // don't let the spark/label spill into the HUD
         if (sheetOk)
             gfx.pushImage(sparkX, sparkY, SPARK_FRAME_W, SPARK_FRAME_H,
                            sheet + (size_t)frame * FRAME_PIXELS, TRANSPARENT_565);
@@ -652,6 +697,7 @@ void playHitEffect(int unitIdx, int hit)
         gfx.setTextColor(TFT_WHITE, TFT_BLACK);
         gfx.setCursor(px + 1, labelY + 1);
         gfx.print(label);
+        gfx.clearClipRect();
         gfx.endWrite();
         delay(FRAME_DELAY_MS);
     }
@@ -754,6 +800,10 @@ void computeReachable(const UnitPlacement &u)
 
 void drawViewport();
 void clampView(); // defined below, with the touch-drag handling it's shared with
+bool saveGame();
+bool loadGame();
+bool hasSavedGame();
+void toast(const char *msg);
 
 // Loads /strings.dat (see convert_assets.py) into scriptStrings/
 // scriptStringOffsets. Safe to call more than once -- a no-op if already
@@ -1375,7 +1425,7 @@ void runIntroScript()
             // the original's smooth pan (no per-frame animation loop to
             // pace it against here).
             viewX = tx * TILE_SIZE - DISPLAY_WIDTH / 2;
-            viewY = ty * TILE_SIZE - DISPLAY_HEIGHT / 2;
+            viewY = ty * TILE_SIZE - MAP_VIEW_H / 2;
             clampView();
             drawViewport();
         }
@@ -1507,8 +1557,28 @@ void startGame(int mapIndex)
     infoUnit = -1;
     gameOver = false;
     winnerColor = -1;
-    viewX = 0;
-    viewY = 0;
+    pauseMenuOpen = false;
+    shopOpen = false;
+    playerGold = 0; // story maps start both sides at 0 in the original
+
+    // Start the camera on the human player's king (color 0), like the
+    // original does -- several maps place your side well down/right of the
+    // origin, so a fixed 0,0 view left your units off-screen at mission
+    // start. Fall back to the first color-0 unit, then to 0,0.
+    int focusX = 0, focusY = 0;
+    for (int i = 0; i < unitCount; ++i)
+    {
+        if (units[i].alive && units[i].color == 0)
+        {
+            focusX = units[i].tileX;
+            focusY = units[i].tileY;
+            if (units[i].type == UNIT_TYPE_KING)
+                break;
+        }
+    }
+    viewX = focusX * TILE_SIZE - DISPLAY_WIDTH / 2;
+    viewY = focusY * TILE_SIZE - MAP_VIEW_H / 2;
+    clampView();
 
     showMissionBriefing(mapIndex);
 
@@ -1591,12 +1661,61 @@ int findAttackTarget(uint8_t type, uint8_t health, int color, int fromX, int fro
     return best;
 }
 
+// For the human's move-then-attack in one turn: among the selected unit's
+// reachable, unoccupied tiles, find the one from which `targetIdx` sits in
+// attack range, favouring the tile that spends the least movement (highest
+// reachableCost left) and, as a tiebreak, the best terrain defence bonus.
+// Returns false if the target can't be both reached and hit this turn.
+bool findAttackApproachTile(const UnitPlacement &attacker, int targetIdx, int &outX, int &outY)
+{
+    outX = outY = -1;
+    if (!reachableCost || targetIdx < 0)
+        return false;
+    const UnitPlacement &target = units[targetIdx];
+    int bestBudget = -1, bestDef = INT32_MIN;
+    for (int x = 0; x < mapWidth; ++x)
+    {
+        for (int y = 0; y < mapHeight; ++y)
+        {
+            int budget = reachableCost[x * mapHeight + y];
+            if (budget < 0)
+                continue;
+            if (unitIndexAt(x, y) >= 0 && !(x == attacker.tileX && y == attacker.tileY))
+                continue;
+            if (!inAttackRangeFrom(attacker.type, x, y, target.tileX, target.tileY))
+                continue;
+            uint8_t tile = tileAt(x, y);
+            int def = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
+            if (budget > bestBudget || (budget == bestBudget && def > bestDef))
+            {
+                bestBudget = budget;
+                bestDef = def;
+                outX = x;
+                outY = y;
+            }
+        }
+    }
+    return outX >= 0;
+}
+
+// True if the selected unit could attack `targetIdx` this turn, whether
+// from where it stands or after a move -- drives the red target highlight.
+bool canAttackThisTurn(const UnitPlacement &attacker, int targetIdx)
+{
+    if (targetIdx < 0 || !units[targetIdx].alive)
+        return false;
+    if (inAttackRange(attacker, units[targetIdx].tileX, units[targetIdx].tileY))
+        return true;
+    int ax, ay;
+    return findAttackApproachTile(attacker, targetIdx, ax, ay);
+}
+
 // A deliberately simple AI move for one unit, evaluated in this priority:
 //   1. Attack an enemy already in range from the current tile.
 //   2. Otherwise, if some reachable tile puts an enemy in range, move
-//      there and attack (this AI is allowed the original's "move then
-//      attack" -- see the note on handleTap() for why human play doesn't
-//      get that). Every reachable attack-capable tile is checked, not just
+//      there and attack (move-then-attack in one turn, as the original
+//      and the human both do -- see handleTap()). Every reachable
+//      attack-capable tile is checked, not just
 //      the first found: a tile reaching a target this unit is guaranteed
 //      to kill (wouldGuaranteeKill() -- true if even the worst-case damage
 //      roll finishes it) always wins over one that only wounds; among
@@ -1809,19 +1928,27 @@ void endTurn()
     drawViewport();
 }
 
-constexpr int HUD_BTN_W = 76;
-constexpr int HUD_BTN_H = 22;
-constexpr int HUD_BTN_X = DISPLAY_WIDTH - HUD_BTN_W - 4;
-constexpr int HUD_BTN_Y = DISPLAY_HEIGHT - HUD_BTN_H - 4;
+// MENU (hamburger), SHOP (cart, placeholder) and END TURN (return-arrow)
+// are square icon buttons in a row at the footer band's right edge; the
+// selected-unit stat panel fills the space to their left. MENU is always
+// available -- a mission whose win condition can't trigger (m4/m6 place
+// no red units, see README) would otherwise trap the player.
+constexpr int ICON_BTN = 30;
+constexpr int ICON_GAP = 5;
+constexpr int ICON_BTN_Y = FOOTER_Y + (FOOTER_H - ICON_BTN) / 2;
 
-// Always-available way back to the mission menu, independent of gameOver.
-// Without this, a mission whose win condition can never trigger (m4/m6
-// place no red units in their map data -- see README) would trap the
-// player in STATE_PLAYING with no way out.
-constexpr int MENU_BTN_W = 50;
-constexpr int MENU_BTN_H = 16;
-constexpr int MENU_BTN_X = DISPLAY_WIDTH - MENU_BTN_W - 4;
-constexpr int MENU_BTN_Y = 2;
+constexpr int HUD_BTN_W = ICON_BTN; // END TURN, rightmost
+constexpr int HUD_BTN_H = ICON_BTN;
+constexpr int HUD_BTN_X = DISPLAY_WIDTH - ICON_BTN - 4;
+constexpr int HUD_BTN_Y = ICON_BTN_Y;
+
+constexpr int SHOP_BTN_X = HUD_BTN_X - ICON_BTN - ICON_GAP;
+constexpr int SHOP_BTN_Y = ICON_BTN_Y;
+
+constexpr int MENU_BTN_W = ICON_BTN;
+constexpr int MENU_BTN_H = ICON_BTN;
+constexpr int MENU_BTN_X = SHOP_BTN_X - ICON_BTN - ICON_GAP;
+constexpr int MENU_BTN_Y = ICON_BTN_Y;
 
 // Win/loss banner geometry, and its RETRY button -- shared between
 // drawViewport() (drawing it) and handleTap() (hit-testing it), so both
@@ -1832,6 +1959,17 @@ constexpr int RETRY_BTN_W = 70;
 constexpr int RETRY_BTN_H = 18;
 constexpr int RETRY_BTN_X = (DISPLAY_WIDTH - RETRY_BTN_W) / 2;
 constexpr int RETRY_BTN_Y = BANNER_Y + BANNER_H + 8;
+
+// Pause menu (hamburger) -- a centred list, shared between drawPauseMenu()
+// and handleTap(). Rows: Return to game / Save game / Load game / Exit to
+// title.
+enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_EXIT, PM_ROWS };
+constexpr int PM_W = 176;
+constexpr int PM_ROW_H = 30;
+constexpr int PM_PAD = 6;
+constexpr int PM_H = PM_ROWS * PM_ROW_H + PM_PAD * 2;
+constexpr int PM_X = (DISPLAY_WIDTH - PM_W) / 2;
+constexpr int PM_Y = (DISPLAY_HEIGHT - PM_H) / 2;
 
 // If u just moved onto an enemy/neutral fraction building it's equipped to
 // capture (Unit.java's UNIT_PROPERTY_CAPTURE_VILLAGE/CASTLE bits -- soldier
@@ -1867,19 +2005,81 @@ void tryCaptureBuilding(const UnitPlacement &u)
 // its stat panel (infoUnit) without starting a move.
 void handleTap(int screenX, int screenY)
 {
-    if (screenX >= MENU_BTN_X && screenX < MENU_BTN_X + MENU_BTN_W &&
-        screenY >= MENU_BTN_Y && screenY < MENU_BTN_Y + MENU_BTN_H)
+    auto inRect = [&](int rx, int ry, int rw, int rh)
+    { return screenX >= rx && screenX < rx + rw && screenY >= ry && screenY < ry + rh; };
+
+    // Modal layers consume the tap before anything game-side sees it.
+    if (shopOpen)
     {
-        infoUnit = -1;
-        appState = STATE_MENU;
-        drawMenu();
+        shopOpen = false;
+        drawViewport();
+        return;
+    }
+    if (pauseMenuOpen)
+    {
+        for (int i = 0; i < PM_ROWS; ++i)
+        {
+            int ry = PM_Y + PM_PAD + i * PM_ROW_H;
+            if (!inRect(PM_X + 6, ry, PM_W - 12, PM_ROW_H - 4))
+                continue;
+            if (i == PM_RETURN)
+            {
+                pauseMenuOpen = false;
+            }
+            else if (i == PM_SAVE)
+            {
+                bool ok = saveGame();
+                drawViewport();
+                toast(ok ? "Game saved" : "Save failed");
+                delay(700);
+            }
+            else if (i == PM_LOAD)
+            {
+                if (!hasSavedGame())
+                    return; // disabled row -- ignore
+                if (loadGame())
+                    pauseMenuOpen = false;
+                else
+                {
+                    drawViewport();
+                    toast("Load failed");
+                    delay(700);
+                }
+            }
+            else // PM_EXIT
+            {
+                pauseMenuOpen = false;
+                selectedUnit = infoUnit = -1;
+                appState = STATE_MENU;
+                drawMenu();
+                return;
+            }
+            drawViewport();
+            return;
+        }
+        pauseMenuOpen = false; // tap outside the list closes it
+        drawViewport();
+        return;
+    }
+
+    if (inRect(MENU_BTN_X, MENU_BTN_Y, ICON_BTN, ICON_BTN))
+    {
+        selectedUnit = infoUnit = -1;
+        pauseMenuOpen = true;
+        drawViewport();
+        return;
+    }
+    if (inRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN))
+    {
+        selectedUnit = infoUnit = -1;
+        shopOpen = true;
+        drawViewport();
         return;
     }
 
     if (gameOver)
     {
-        if (screenX >= RETRY_BTN_X && screenX < RETRY_BTN_X + RETRY_BTN_W &&
-            screenY >= RETRY_BTN_Y && screenY < RETRY_BTN_Y + RETRY_BTN_H)
+        if (inRect(RETRY_BTN_X, RETRY_BTN_Y, RETRY_BTN_W, RETRY_BTN_H))
         {
             startGame(currentMapIndex);
             return;
@@ -1890,16 +2090,20 @@ void handleTap(int screenX, int screenY)
         return;
     }
 
-    if (screenX >= HUD_BTN_X && screenX < HUD_BTN_X + HUD_BTN_W &&
-        screenY >= HUD_BTN_Y && screenY < HUD_BTN_Y + HUD_BTN_H)
+    if (inRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H))
     {
         infoUnit = -1;
         endTurn();
         return;
     }
 
+    // Taps in the header/footer bands that missed a button do nothing to
+    // the map (and never map to a bogus edge tile).
+    if (screenY < MAP_VIEW_Y || screenY >= MAP_VIEW_Y + MAP_VIEW_H)
+        return;
+
     int mx = (screenX + viewX) / TILE_SIZE;
-    int my = (screenY + viewY) / TILE_SIZE;
+    int my = (screenY - MAP_VIEW_Y + viewY) / TILE_SIZE;
     if (!inMapBounds(mx, my))
     {
         if (infoUnit >= 0)
@@ -1913,33 +2117,44 @@ void handleTap(int screenX, int screenY)
     if (selectedUnit >= 0)
     {
         int targetIdx = unitIndexAt(mx, my);
-        // Attacking is a standalone action from the unit's current tile --
-        // this is "move OR attack" per turn, not the original's "move then
-        // attack". aiActUnit() below shows the underlying tracking
-        // (reachable-attack range from every tile in the move range,
-        // not just the current one) is doable; this is a deliberate
-        // simplification for human play, not a technical limit -- doing
-        // it live as a human drags a selection around (highlighting
-        // which reachable tiles also open an attack) is more UI than
-        // this milestone scoped.
-        if (targetIdx >= 0 && units[targetIdx].color != currentTurn && inAttackRange(units[selectedUnit], mx, my))
+        UnitPlacement &sel = units[selectedUnit];
+        bool tappedEnemy = targetIdx >= 0 && units[targetIdx].color != currentTurn;
+
+        if (tappedEnemy && inAttackRange(sel, mx, my))
         {
+            // Already in range -- attack from where it stands.
             attackUnit(selectedUnit, targetIdx);
-            units[selectedUnit].hasMoved = true;
+            sel.hasMoved = true;
+        }
+        else if (tappedEnemy)
+        {
+            // Move into range first, then attack (one turn) -- same as the
+            // AI's move-then-attack in aiActUnit().
+            int ax, ay;
+            if (findAttackApproachTile(sel, targetIdx, ax, ay))
+            {
+                sel.tileX = (int16_t)ax;
+                sel.tileY = (int16_t)ay;
+                tryCaptureBuilding(sel);
+                attackUnit(selectedUnit, targetIdx);
+                sel.hasMoved = true;
+            }
+            else
+            {
+                infoUnit = targetIdx; // can't be reached-and-hit this turn -- show its panel
+            }
         }
         else if (reachableCost && reachableCost[mx * mapHeight + my] >= 0 && targetIdx < 0)
         {
-            units[selectedUnit].tileX = (int16_t)mx;
-            units[selectedUnit].tileY = (int16_t)my;
-            units[selectedUnit].hasMoved = true;
-            tryCaptureBuilding(units[selectedUnit]);
+            sel.tileX = (int16_t)mx;
+            sel.tileY = (int16_t)my;
+            sel.hasMoved = true;
+            tryCaptureBuilding(sel);
         }
         else if (targetIdx >= 0)
         {
-            // Tapped a unit that wasn't a valid attack target from here (out
-            // of range, or on the current player's own side) -- deselecting
-            // silently would make tap-to-inspect need a second tap on any
-            // unit tapped while another was already selected. Show its
+            // Tapped a friendly/own unit while one was selected -- deselecting
+            // silently would make tap-to-inspect need a second tap. Show its
             // panel instead, same as tapping it with nothing selected would.
             infoUnit = targetIdx;
         }
@@ -1967,12 +2182,278 @@ void handleTap(int screenX, int screenY)
     }
 }
 
+// Writes a fully-desaturated, slightly-dimmed copy of an RGB565 unit-icon
+// frame into `out` (same UNIT_ICON_SIZE^2 layout). TRANSPARENT_565 pixels
+// pass through untouched so the sprite's cut-out edges stay transparent.
+static void desaturateIcon(const uint16_t *src, uint16_t *out)
+{
+    for (int i = 0; i < UNIT_ICON_SIZE * UNIT_ICON_SIZE; ++i)
+    {
+        uint16_t p = src[i];
+        if (p == TRANSPARENT_565)
+        {
+            out[i] = p;
+            continue;
+        }
+        int r = ((p >> 11) & 0x1F) * 255 / 31;
+        int g = ((p >> 5) & 0x3F) * 255 / 63;
+        int b = (p & 0x1F) * 255 / 31;
+        int y = (r * 77 + g * 150 + b * 29) >> 8; // Rec.601 luma
+        y = y * 5 / 8;                            // dim so it reads as "disabled"
+        out[i] = (uint16_t)(((y * 31 / 255) << 11) | ((y * 63 / 255) << 5) | (y * 31 / 255));
+    }
+}
+
+constexpr uint16_t BAND_BG = 0x18E3;   // near-black, distinct from the map
+constexpr uint16_t BAND_EDGE = 0x4208; // thin separator line
+constexpr uint16_t GOLD_COLOR = 0xFEA0; // warm coin yellow
+
+// A little coin glyph with its centre at (cx, cy), ~9px across.
+static void drawCoin(int cx, int cy)
+{
+    gfx.fillCircle(cx, cy, 4, GOLD_COLOR);
+    gfx.drawCircle(cx, cy, 4, 0x9C40);   // darker rim
+    gfx.drawFastVLine(cx, cy - 2, 5, 0x9C40); // a stamped mark
+}
+
+// The header and footer bands. Opaque, drawn every frame over a fixed
+// screen region the map never touches (drawViewport() clips the map to
+// the strip between them), so HUD and terrain never overlap.
+//   header: whose turn it is (left), gold (right)
+//   footer: selected-unit stats or the living-unit tally (left);
+//           MENU / SHOP / END TURN icon buttons (right)
+void drawHud()
+{
+    // ---- header ----
+    gfx.fillRect(0, 0, DISPLAY_WIDTH, HEADER_H, BAND_BG);
+    gfx.drawFastHLine(0, HEADER_H - 1, DISPLAY_WIDTH, BAND_EDGE);
+    gfx.setTextSize(1);
+    gfx.setTextColor(currentTurn == 0 ? TFT_CYAN : TFT_RED, BAND_BG);
+    gfx.setCursor(4, 4);
+    gfx.print(currentTurn == 0 ? "YOUR TURN" : "ENEMY TURN");
+
+    char goldStr[12];
+    snprintf(goldStr, sizeof(goldStr), "%ld", (long)playerGold);
+    int goldTextX = DISPLAY_WIDTH - 4 - (int)strlen(goldStr) * 6;
+    drawCoin(goldTextX - 8, 7);
+    gfx.setTextColor(GOLD_COLOR, BAND_BG);
+    gfx.setCursor(goldTextX, 4);
+    gfx.print(goldStr);
+
+    // ---- footer ----
+    gfx.fillRect(0, FOOTER_Y, DISPLAY_WIDTH, FOOTER_H, BAND_BG);
+    gfx.drawFastHLine(0, FOOTER_Y, DISPLAY_WIDTH, BAND_EDGE);
+
+    // MENU (hamburger), SHOP (cart), END TURN (return arrow) -- left to
+    // right at the footer's right edge.
+    gfx.fillRoundRect(MENU_BTN_X, MENU_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_DARKGREY);
+    gfx.drawRoundRect(MENU_BTN_X, MENU_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_WHITE);
+    {
+        int bx = MENU_BTN_X + 8, bw = ICON_BTN - 16;
+        for (int k = 0; k < 3; ++k)
+            gfx.fillRect(bx, MENU_BTN_Y + 8 + k * 6, bw, 3, TFT_WHITE);
+    }
+
+    gfx.fillRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_DARKGREY);
+    gfx.drawRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_WHITE);
+    {
+        // Shopping cart: basket outline, angled handle, two wheels.
+        int cx = SHOP_BTN_X + ICON_BTN / 2, cy = SHOP_BTN_Y + ICON_BTN / 2;
+        gfx.drawRect(cx - 6, cy - 4, 13, 9, GOLD_COLOR);
+        gfx.drawLine(cx - 6, cy - 4, cx - 10, cy - 8, GOLD_COLOR);
+        gfx.fillCircle(cx - 3, cy + 8, 2, GOLD_COLOR);
+        gfx.fillCircle(cx + 4, cy + 8, 2, GOLD_COLOR);
+    }
+
+    gfx.fillRoundRect(HUD_BTN_X, HUD_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_DARKGREEN);
+    gfx.drawRoundRect(HUD_BTN_X, HUD_BTN_Y, ICON_BTN, ICON_BTN, 4, TFT_WHITE);
+    {
+        // "Return" glyph: a riser on the right, a shaft running left, and
+        // an arrowhead pointing left (end the turn / hand back control).
+        int cx = HUD_BTN_X + ICON_BTN / 2, cy = HUD_BTN_Y + ICON_BTN / 2;
+        gfx.fillRect(cx + 4, cy - 7, 3, 12, TFT_WHITE);            // riser
+        gfx.fillRect(cx - 5, cy + 2, 12, 3, TFT_WHITE);            // shaft
+        gfx.fillTriangle(cx - 9, cy + 3, cx - 3, cy - 2, cx - 3, cy + 8, TFT_WHITE); // head
+    }
+
+    // Footer-left: the tap-to-inspect unit's stats, else the unit
+    // currently selected to act with, else the living-unit tally. A unit
+    // that died since the tap (e.g. an AI turn ran) just stops showing.
+    if (infoUnit >= 0 && (infoUnit >= unitCount || !units[infoUnit].alive))
+        infoUnit = -1;
+    int showUnit = infoUnit >= 0 ? infoUnit : selectedUnit;
+    int panelX = 5, panelY = FOOTER_Y + 5;
+    if (showUnit >= 0 && showUnit < unitCount && units[showUnit].alive)
+    {
+        const UnitPlacement &iu = units[showUnit];
+        uint16_t ownerColor = iu.color == 0 ? TFT_CYAN : TFT_RED;
+        gfx.setTextColor(ownerColor, BAND_BG);
+        gfx.setCursor(panelX, panelY);
+        gfx.printf("%s  HP %d", UNIT_TYPE_NAMES[iu.type], iu.health);
+        gfx.setTextColor(TFT_WHITE, BAND_BG);
+        gfx.setCursor(panelX, panelY + 12);
+        gfx.printf("ATK %d-%d  DEF %d", UNIT_OFFENCE_MIN[iu.type], UNIT_OFFENCE_MAX[iu.type], UNIT_DEFENCE[iu.type]);
+        gfx.setCursor(panelX, panelY + 24);
+        gfx.printf("RNG %d-%d  MOV %d", UNIT_ATTACK_RANGE_MIN[iu.type], UNIT_ATTACK_RANGE_MAX[iu.type], UNIT_MOVE_RANGE[iu.type]);
+    }
+    else
+    {
+        int blueAlive = 0, redAlive = 0;
+        for (int i = 0; i < unitCount; ++i)
+        {
+            if (!units[i].alive)
+                continue;
+            if (units[i].color == 0)
+                ++blueAlive;
+            else if (units[i].color == 1)
+                ++redAlive;
+        }
+        gfx.setCursor(panelX, panelY + 12);
+        gfx.setTextColor(TFT_CYAN, BAND_BG);
+        gfx.printf("%d", blueAlive);
+        gfx.setTextColor(TFT_WHITE, BAND_BG);
+        gfx.print(" units  vs  ");
+        gfx.setTextColor(TFT_RED, BAND_BG);
+        gfx.printf("%d", redAlive);
+    }
+}
+
+// --- Save / load ------------------------------------------------------
+// A single NVS slot ("aeii"/"save"): a flat snapshot of the mission in
+// progress, enough to resume a story map exactly. Skirmish state and
+// mission-script progress aren't covered (no skirmish here; m0's cutscene
+// only runs at mission start).
+struct SaveBlob
+{
+    uint32_t magic;
+    int32_t mapIndex;
+    int32_t turn;
+    int32_t gold;
+    int32_t viewX, viewY;
+    int32_t count;
+    uint8_t over;
+    int8_t winner;
+    UnitPlacement units[MAX_UNITS];
+};
+constexpr uint32_t SAVE_MAGIC = 0x41453201; // "AE2", format 1
+
+bool hasSavedGame()
+{
+    Preferences p;
+    if (!p.begin("aeii", true))
+        return false;
+    bool ok = p.getBytesLength("save") == sizeof(SaveBlob);
+    p.end();
+    return ok;
+}
+
+bool saveGame()
+{
+    if (currentMapIndex < 0)
+        return false;
+    SaveBlob b{};
+    b.magic = SAVE_MAGIC;
+    b.mapIndex = currentMapIndex;
+    b.turn = currentTurn;
+    b.gold = playerGold;
+    b.viewX = viewX;
+    b.viewY = viewY;
+    b.count = unitCount;
+    b.over = gameOver ? 1 : 0;
+    b.winner = (int8_t)winnerColor;
+    memcpy(b.units, units, sizeof(units));
+
+    Preferences p;
+    if (!p.begin("aeii", false))
+        return false;
+    size_t n = p.putBytes("save", &b, sizeof(b));
+    p.end();
+    return n == sizeof(b);
+}
+
+bool loadGame()
+{
+    Preferences p;
+    if (!p.begin("aeii", true))
+        return false;
+    SaveBlob b{};
+    size_t n = p.getBytes("save", &b, sizeof(b));
+    p.end();
+    if (n != sizeof(b) || b.magic != SAVE_MAGIC ||
+        b.mapIndex < 0 || b.mapIndex >= STORY_MAP_COUNT ||
+        b.count < 0 || b.count > MAX_UNITS)
+        return false;
+
+    startGame((int)b.mapIndex); // reloads terrain + sets STATE_PLAYING
+    currentTurn = (int)b.turn;
+    playerGold = b.gold;
+    unitCount = (int)b.count;
+    memcpy(units, b.units, sizeof(units));
+    gameOver = b.over != 0;
+    winnerColor = b.winner;
+    selectedUnit = infoUnit = -1;
+    viewX = b.viewX;
+    viewY = b.viewY;
+    clampView();
+    return true;
+}
+
+// A brief centred toast (used for save confirmations / errors). Drawn now,
+// wiped by the next drawViewport().
+void toast(const char *msg)
+{
+    int w = (int)strlen(msg) * 6 + 16;
+    int x = (DISPLAY_WIDTH - w) / 2, y = MAP_VIEW_Y + MAP_VIEW_H / 2 - 10;
+    gfx.fillRoundRect(x, y, w, 20, 4, TFT_BLACK);
+    gfx.drawRoundRect(x, y, w, 20, 4, TFT_WHITE);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setTextSize(1);
+    gfx.setCursor(x + 8, y + 6);
+    gfx.print(msg);
+}
+
+void drawPauseMenu()
+{
+    static const char *LABELS[PM_ROWS] = {"Return to game", "Save game", "Load game", "Exit to title"};
+    gfx.fillRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, 0x2945);
+    gfx.drawRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, TFT_WHITE);
+    gfx.setTextSize(1);
+    for (int i = 0; i < PM_ROWS; ++i)
+    {
+        int ry = PM_Y + PM_PAD + i * PM_ROW_H;
+        bool disabled = (i == PM_LOAD && !hasSavedGame());
+        gfx.fillRoundRect(PM_X + 6, ry, PM_W - 12, PM_ROW_H - 4, 4, disabled ? 0x2104 : TFT_DARKGREY);
+        gfx.setTextColor(disabled ? 0x8410 : TFT_WHITE, disabled ? 0x2104 : TFT_DARKGREY);
+        gfx.setCursor(PM_X + 16, ry + (PM_ROW_H - 4 - 8) / 2);
+        gfx.print(LABELS[i]);
+    }
+}
+
+void drawShopNotice()
+{
+    constexpr int W = 180, H = 70;
+    int x = (DISPLAY_WIDTH - W) / 2, y = (DISPLAY_HEIGHT - H) / 2;
+    gfx.fillRoundRect(x, y, W, H, 6, 0x2945);
+    gfx.drawRoundRect(x, y, W, H, 6, GOLD_COLOR);
+    gfx.setTextSize(2);
+    gfx.setTextColor(GOLD_COLOR, 0x2945);
+    gfx.setCursor(x + 60, y + 10);
+    gfx.print("SHOP");
+    gfx.setTextSize(1);
+    gfx.setTextColor(TFT_WHITE, 0x2945);
+    gfx.setCursor(x + 40, y + 34);
+    gfx.print("coming soon");
+    gfx.setTextColor(0xAD55, 0x2945);
+    gfx.setCursor(x + 42, y + 50);
+    gfx.print("tap to close");
+}
+
 void drawViewport()
 {
     int firstCol = viewX / TILE_SIZE;
     int firstRow = viewY / TILE_SIZE;
     int cols = DISPLAY_WIDTH / TILE_SIZE + 2;
-    int rows = DISPLAY_HEIGHT / TILE_SIZE + 2;
+    int rows = MAP_VIEW_H / TILE_SIZE + 2;
 
     // Load every tile this frame needs from the SD card *before* opening the
     // display transaction below. SD/MMC and the display SPI bus are on
@@ -2001,6 +2482,12 @@ void drawViewport()
     }
 
     gfx.startWrite();
+
+    // Everything map-related is confined to the viewport strip between the
+    // header and footer -- clip so a tile or unit sprite at the edge can't
+    // bleed into either band.
+    gfx.setClipRect(0, MAP_VIEW_Y, DISPLAY_WIDTH, MAP_VIEW_H);
+
     for (int row = 0; row < rows; ++row)
     {
         for (int col = 0; col < cols; ++col)
@@ -2012,7 +2499,7 @@ void drawViewport()
 
             uint8_t tile = tileAt(mx, my);
             int px = mx * TILE_SIZE - viewX;
-            int py = my * TILE_SIZE - viewY;
+            int py = tileScreenY(my);
 
             if (tile >= TILE_COUNT || !tileLoaded[tile])
             {
@@ -2040,7 +2527,7 @@ void drawViewport()
                 if (reachableCost[mx * mapHeight + my] < 0)
                     continue;
                 int px = mx * TILE_SIZE - viewX;
-                int py = my * TILE_SIZE - viewY;
+                int py = tileScreenY(my);
                 gfx.drawRect(px, py, TILE_SIZE, TILE_SIZE, TFT_CYAN);
                 gfx.drawRect(px + 1, py + 1, TILE_SIZE - 2, TILE_SIZE - 2, TFT_CYAN);
             }
@@ -2053,15 +2540,27 @@ void drawViewport()
         if (!u.alive || !unitIconLoaded[u.color][u.type])
             continue; // dead, out of view this frame, or failed to load
         int px = u.tileX * TILE_SIZE - viewX;
-        int py = u.tileY * TILE_SIZE - viewY;
-        if (px <= -UNIT_ICON_SIZE || py <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH || py >= DISPLAY_HEIGHT)
+        int py = tileScreenY(u.tileY);
+        if (px <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH ||
+            py <= MAP_VIEW_Y - UNIT_ICON_SIZE || py >= MAP_VIEW_Y + MAP_VIEW_H)
             continue;
-        gfx.pushImage(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, unitIconFrame(u.color, u.type), TRANSPARENT_565);
+        // A unit of the side whose turn it is that has used its action is
+        // done until next turn -- draw it desaturated + dimmed so it reads
+        // as unavailable, without touching the sprite's transparent edges
+        // the way a flat overlay rect would.
+        const uint16_t *frame = unitIconFrame(u.color, u.type);
+        if (u.hasMoved && u.color == currentTurn)
+        {
+            static uint16_t greyed[UNIT_ICON_SIZE * UNIT_ICON_SIZE];
+            desaturateIcon(frame, greyed);
+            frame = greyed;
+        }
+        gfx.pushImage(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, frame, TRANSPARENT_565);
 
         if (i == selectedUnit)
             gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_YELLOW);
-        else if (selectedUnit >= 0 && u.color != currentTurn && inAttackRange(units[selectedUnit], u.tileX, u.tileY))
-            gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_RED); // valid attack target this turn
+        else if (selectedUnit >= 0 && u.color != currentTurn && canAttackThisTurn(units[selectedUnit], i))
+            gfx.drawRect(px, py, UNIT_ICON_SIZE, UNIT_ICON_SIZE, TFT_RED); // attackable this turn (from here or after moving)
 
         if (u.health < 100)
         {
@@ -2072,76 +2571,9 @@ void drawViewport()
         }
     }
 
-    // HUD: fixed screen-space overlay, always on top, not affected by scroll.
-    uint16_t turnColor = currentTurn == 0 ? TFT_BLUE : TFT_RED;
-    gfx.fillRect(0, 0, 90, 16, TFT_BLACK);
-    gfx.setTextColor(turnColor, TFT_BLACK);
-    gfx.setTextSize(1);
-    gfx.setCursor(2, 4);
-    gfx.print(currentTurn == 0 ? "BLUE TURN" : "RED TURN");
+    gfx.clearClipRect();
 
-    // Living-unit counts, both sides -- how the battle stands at a glance,
-    // updated every redraw since a unit can die on any turn (yours or the
-    // AI's). Only colors 0 (blue)/1 (red) are counted: story maps never
-    // place units of the other two team colors this port's asset pipeline
-    // converts (see the team-color note in firmware/README.md), so a
-    // green/black count would always read 0 here.
-    int blueAlive = 0, redAlive = 0;
-    for (int i = 0; i < unitCount; ++i)
-    {
-        if (!units[i].alive)
-            continue;
-        if (units[i].color == 0)
-            ++blueAlive;
-        else if (units[i].color == 1)
-            ++redAlive;
-    }
-    constexpr int UNIT_COUNT_X = 96;
-    gfx.fillRect(UNIT_COUNT_X, 0, MENU_BTN_X - UNIT_COUNT_X, 16, TFT_BLACK);
-    gfx.setCursor(UNIT_COUNT_X, 4);
-    gfx.setTextColor(TFT_BLUE, TFT_BLACK);
-    gfx.print(blueAlive);
-    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-    gfx.print(":");
-    gfx.setTextColor(TFT_RED, TFT_BLACK);
-    gfx.print(redAlive);
-
-    gfx.fillRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_DARKGREY);
-    gfx.drawRect(MENU_BTN_X, MENU_BTN_Y, MENU_BTN_W, MENU_BTN_H, TFT_WHITE);
-    gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
-    gfx.setCursor(MENU_BTN_X + 6, MENU_BTN_Y + 4);
-    gfx.print("MENU");
-
-    gfx.fillRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_DARKGREY);
-    gfx.drawRect(HUD_BTN_X, HUD_BTN_Y, HUD_BTN_W, HUD_BTN_H, TFT_WHITE);
-    gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
-    gfx.setCursor(HUD_BTN_X + 6, HUD_BTN_Y + 7);
-    gfx.print("END TURN");
-
-    // Tap-to-inspect stat panel (see infoUnit's comment) -- bottom-left,
-    // clear of the END TURN button on the bottom-right. A unit that died
-    // or otherwise vanished since the tap (e.g. an AI turn ran) just stops
-    // showing rather than reading stale/invalid data.
-    if (infoUnit >= 0 && (infoUnit >= unitCount || !units[infoUnit].alive))
-        infoUnit = -1;
-    if (infoUnit >= 0)
-    {
-        const UnitPlacement &iu = units[infoUnit];
-        constexpr int PANEL_W = HUD_BTN_X - 8;
-        constexpr int PANEL_H = 40;
-        constexpr int PANEL_X = 4;
-        constexpr int PANEL_Y = DISPLAY_HEIGHT - PANEL_H - 4;
-        uint16_t ownerColor = iu.color == 0 ? TFT_BLUE : TFT_RED;
-        gfx.fillRect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, TFT_BLACK);
-        gfx.drawRect(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, ownerColor);
-        gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-        gfx.setCursor(PANEL_X + 4, PANEL_Y + 3);
-        gfx.printf("%s HP %d", UNIT_TYPE_NAMES[iu.type], iu.health);
-        gfx.setCursor(PANEL_X + 4, PANEL_Y + 13);
-        gfx.printf("ATK %d-%d DEF %d", UNIT_OFFENCE_MIN[iu.type], UNIT_OFFENCE_MAX[iu.type], UNIT_DEFENCE[iu.type]);
-        gfx.setCursor(PANEL_X + 4, PANEL_Y + 23);
-        gfx.printf("RANGE %d-%d MOVE %d", UNIT_ATTACK_RANGE_MIN[iu.type], UNIT_ATTACK_RANGE_MAX[iu.type], UNIT_MOVE_RANGE[iu.type]);
-    }
+    drawHud();
 
     if (gameOver)
     {
@@ -2166,13 +2598,18 @@ void drawViewport()
         gfx.print("RETRY");
     }
 
+    if (pauseMenuOpen)
+        drawPauseMenu();
+    else if (shopOpen)
+        drawShopNotice();
+
     gfx.endWrite();
 }
 
 void clampView()
 {
     int maxX = mapWidth * TILE_SIZE - DISPLAY_WIDTH;
-    int maxY = mapHeight * TILE_SIZE - DISPLAY_HEIGHT;
+    int maxY = mapHeight * TILE_SIZE - MAP_VIEW_H;
     viewX = constrain(viewX, 0, max(0, maxX));
     viewY = constrain(viewY, 0, max(0, maxY));
 }
@@ -2285,6 +2722,65 @@ bool allocAssetCaches()
     return true;
 }
 
+// Full-screen touch calibration harness (TOUCH_DEBUG only). Blocks until
+// the "DONE" box is tapped. Draws a reference frame with corner labels,
+// then a live crosshair + coordinate readout at the reported touch point
+// and a dot trail, so a mis-scaled / rotated / mirrored / dead touch
+// panel is obvious just by pressing a known spot and reading the number.
+void touchTest()
+{
+    gfx.fillScreen(TFT_BLACK);
+    gfx.drawRect(0, 0, gfx.width(), gfx.height(), TFT_DARKGREY);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setTextSize(1);
+    gfx.setCursor(4, 4);
+    gfx.print("TL 0,0");
+    gfx.setCursor(gfx.width() - 52, 4);
+    gfx.printf("TR %d,0", gfx.width() - 1);
+    gfx.setCursor(4, gfx.height() - 12);
+    gfx.printf("BL 0,%d", gfx.height() - 1);
+    gfx.setCursor(gfx.width() - 74, gfx.height() - 12);
+    gfx.printf("BR %d,%d", gfx.width() - 1, gfx.height() - 1);
+
+    // DONE box, top-centre.
+    const int bw = 70, bh = 26, bx = (gfx.width() - bw) / 2, by = 2;
+    auto drawDone = [&]() {
+        gfx.fillRect(bx, by, bw, bh, TFT_RED);
+        gfx.setTextColor(TFT_WHITE, TFT_RED);
+        gfx.setTextSize(2);
+        gfx.setCursor(bx + 10, by + 6);
+        gfx.print("DONE");
+    };
+    drawDone();
+
+    int32_t x, y;
+    bool wasDown = false;
+    while (true)
+    {
+        ArduinoOTA.handle();
+        bool down = gfx.getTouch(&x, &y);
+        if (down && !wasDown)
+        {
+            if (x >= bx && x < bx + bw && y >= by && y < by + bh)
+                return;
+            Serial.printf("[touchtest] %ld,%ld\n", (long)x, (long)y);
+            gfx.fillRect(0, 40, gfx.width(), 40, TFT_BLACK);
+            gfx.setTextColor(TFT_GREEN, TFT_BLACK);
+            gfx.setTextSize(3);
+            gfx.setCursor(10, 46);
+            gfx.printf("%ld,%ld", (long)x, (long)y);
+            gfx.drawFastHLine(x - 12, y, 25, TFT_YELLOW);
+            gfx.drawFastVLine(x, y - 12, 25, TFT_YELLOW);
+        }
+        else if (down)
+        {
+            gfx.fillCircle(x, y, 2, TFT_CYAN);
+        }
+        wasDown = down;
+        delay(16);
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -2350,6 +2846,9 @@ void setup()
 
     loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
 
+    if (TOUCH_DEBUG)
+        touchTest();
+
     showTitleScreen(); // best-effort; see its comment -- missing assets skip straight to the menu
 
     drawMenu();
@@ -2377,6 +2876,7 @@ void loop()
         return;
     }
 
+
     // No usable asset source: keep servicing OTA (above) but run no game logic.
     if (!assetsReady)
     {
@@ -2393,19 +2893,22 @@ void loop()
             isDrag = false;
         }
         // The menu has nothing to drag-pan, so only STATE_PLAYING
-        // distinguishes a tap from a drag; every menu touch is a tap.
-        else if (appState == STATE_PLAYING)
+        // distinguishes a tap from a drag; every menu touch is a tap. A
+        // gesture that begins in the header/footer band, or while a modal
+        // (pause menu / shop) is up, is never a pan -- only a tap.
+        else if (appState == STATE_PLAYING && !pauseMenuOpen && !shopOpen &&
+                 touchStartY >= MAP_VIEW_Y && touchStartY < MAP_VIEW_Y + MAP_VIEW_H)
         {
             if (!isDrag && (abs(x - touchStartX) > TAP_MOVE_THRESHOLD || abs(y - touchStartY) > TAP_MOVE_THRESHOLD))
                 isDrag = true;
             if (isDrag)
             {
-                // Drag moves the camera the same direction as the finger
-                // (drag right -> see more of the map to the right), i.e.
-                // the viewport tracks the finger rather than the map
-                // sticking to it.
-                viewX += (x - lastX);
-                viewY += (y - lastY);
+                // "Grab the map" panning: drag right and the map content
+                // follows your finger (the viewport's left edge moves
+                // left). The earlier inverted feel was the 180-deg touch
+                // mismatch, now fixed in LGFX_Config.h.
+                viewX -= (x - lastX);
+                viewY -= (y - lastY);
                 clampView();
                 drawViewport();
             }

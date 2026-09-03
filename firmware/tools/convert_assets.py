@@ -95,6 +95,15 @@ UNIT_ICON_SIZE = 24  # unit_icons.sprite: FrameWidth/Height 24
 UNIT_TYPE_COUNT = 12  # Unit.UNIT_NAMES.length
 UNIT_COLORS = ["blue", "red", "green", "black"]  # MainDisplayable.FRACTION_COLOR_PREFIXES order
 
+KING_UNIT_TYPE = 9  # Unit.java: type 9 is the king
+# The king's head is a separate sprite the original overlays on the body
+# (Unit.paintEx(): sprKingHeadIcons[0].paintFrame(kingVariant*2 + frame)).
+# king_head_icons.png is 4 heads across (one per fraction/colour), each
+# 13x12, drawn at body-origin + Translate (7, 0) for the idle frame. Bake
+# that composite straight into the king's body icon per colour.
+KING_HEAD_W, KING_HEAD_H = 13, 12
+KING_HEAD_OFFSET = (7, 0)
+
 # Must match TRANSPARENT_565 in firmware/src/main.cpp -- pure magenta, chosen
 # because it doesn't occur in any of this game's sprite art.
 TRANSPARENT_565 = 0xF81F
@@ -154,8 +163,9 @@ def convert_effect_sprite(name, dst_dir):
         write_raw565(im.crop(box), dst, transparent=True)
 
 
-def convert_unit_icons(color, dst_dir):
+def convert_unit_icons(color, color_index, dst_dir):
     im = Image.open(os.path.join(RES_DIR, color, "unit_icons.png")).convert("RGBA")
+    king_heads = Image.open(os.path.join(RES_DIR, "king_head_icons.png")).convert("RGBA")
     for unit_type in range(UNIT_TYPE_COUNT):
         # Row 0 of the sheet (see unit_icons.sprite's FrameDef list): frame
         # index == unit type for the first of its two map-icon variants.
@@ -164,6 +174,13 @@ def convert_unit_icons(color, dst_dir):
             (unit_type + 1) * UNIT_ICON_SIZE, UNIT_ICON_SIZE,
         )
         frame = im.crop(box)
+        if unit_type == KING_UNIT_TYPE:
+            head = king_heads.crop((
+                color_index * KING_HEAD_W, 0,
+                color_index * KING_HEAD_W + KING_HEAD_W, KING_HEAD_H,
+            ))
+            frame = frame.copy()
+            frame.alpha_composite(head, KING_HEAD_OFFSET)
         dst = os.path.join(dst_dir, f"{color}_{unit_type:02d}.bin")
         write_raw565(frame, dst, transparent=True)
 
@@ -188,8 +205,8 @@ def main():
         convert_tile(src, dst)
         print(f"converted {os.path.basename(src)} -> {os.path.relpath(dst, OUT_DIR)}")
 
-    for color in UNIT_COLORS:
-        convert_unit_icons(color, units_out)
+    for color_index, color in enumerate(UNIT_COLORS):
+        convert_unit_icons(color, color_index, units_out)
         print(f"converted {color}/unit_icons.png -> units/{color}_*.bin ({UNIT_TYPE_COUNT} frames)")
 
     STORY_MAP_COUNT = 8  # m0.aem .. m7.aem
