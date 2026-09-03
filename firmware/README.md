@@ -306,6 +306,10 @@ not yet confirmed on-device.
   same way -- once its units have moved, it buys the priciest unit it can
   afford (up to a 10-unit soft cap) and drops it by its castle. Per-side
   gold is carried in the save (format 4).
+- Turn-start healing (`applyTurnHealing()`): a unit that begins its side's
+  turn standing on a **neutral town** (terrain type 7) or a **building
+  that side owns** heals up to **20 HP** (capped at 100), matching the
+  original's turn-start heal loop.
 - WiFi + OTA updates (`ArduinoOTA`): flash once over USB, then push
   subsequent builds wirelessly — see "Build & flash" below
 

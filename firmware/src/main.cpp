@@ -38,9 +38,10 @@
 // at its turn start from the villages (+30) and castles (+50) it owns;
 // the SHOP button (on your turn, if you hold a castle) opens a recruit
 // list -- pick an affordable unit, then tap a green tile next to one of
-// your castles to deploy it. The AI recruits too. MENU opens an
-// in-mission pause menu -- return / save / load (an NVS snapshot) / exit
-// to title. A mission ends when a side's king
+// your castles to deploy it. The AI recruits too. A unit that starts its
+// side's turn on a neutral town or a building that side owns heals up to
+// 20 HP. MENU opens an in-mission pause menu -- return / save / load (an
+// NVS snapshot) / exit to title. A mission ends when a side's king
 // dies or that side is wiped out entirely (checkEndConditions()) -- a
 // simplification of the original's castle-capture-tied defeat, see
 // README. The win banner has a RETRY button that reloads the same mission
@@ -2046,6 +2047,30 @@ int computeIncome(int c)
     return income;
 }
 
+// At each side's turn start the original heals up to 20 HP (capped at
+// 100) for each of that side's units standing on a neutral town (terrain
+// type 7) or a building that side owns -- MainDisplayable ~4102.
+constexpr int TURN_HEAL = 20;
+void applyTurnHealing(int color)
+{
+    for (int i = 0; i < unitCount; ++i)
+    {
+        UnitPlacement &u = units[i];
+        if (!u.alive || u.color != color || u.health >= 100)
+            continue;
+        uint8_t t = tileAt(u.tileX, u.tileY);
+        if (t >= TILE_COUNT)
+            continue;
+        bool onTown = TILE_TERRAIN_TYPE[t] == 7;
+        bool onOwned = isFractionBuilding(t) && buildingFraction(t) == color + 1;
+        if (!onTown && !onOwned)
+            continue;
+        int heal = min(TURN_HEAL, 100 - (int)u.health);
+        u.health += heal;
+        Serial.printf("heal: color %d unit %d +%d (hp %d)\n", color, i, heal, u.health);
+    }
+}
+
 void switchTurn()
 {
     currentTurn = 1 - currentTurn;
@@ -2062,6 +2087,7 @@ void switchTurn()
         gold[currentTurn] += income;
         Serial.printf("turn income: color %d +%d (now %ld)\n", currentTurn, income, (long)gold[currentTurn]);
     }
+    applyTurnHealing(currentTurn);
 }
 
 void endTurn()
