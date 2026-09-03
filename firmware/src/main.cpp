@@ -642,27 +642,64 @@ void checkEndConditions()
     Serial.printf("game over: color %d wins (opponent eliminated)\n", winnerColor);
 }
 
-// One hit: attackerIdx's roll in [offenceMin, offenceMax) against
-// victimIdx's defence (base + terrain bonus), scaled by the attacker's
-// current health%. Shared by attackUnit()'s direct hit and its
-// counterattack. Deliberately does NOT port the original's per-property
-// matchup bonuses (mounted-vs-ground, golem-vs-skeleton, water/swamp
-// bonuses, etc. -- see Unit.java's getOffenceBonusAgainstUnit()):
-// UNIT_PROPERTIES is read elsewhere for capture eligibility, but the
-// matchup-bonus bits it also carries aren't interpreted here. Returns the
-// damage dealt, for attackUnit()'s hit-effect animation.
+constexpr uint8_t TEMPLE_TILE = 34; // the one non-fraction "town" graphic that grants combat bonuses
+
+// Ported from Unit.getOffenceBonusAgainstUnitEx(): flat offence added when
+// this attacker/victim/attacker-tile combination matches a matchup rule.
+//   - archer (property bit 6) vs a flyer (property bit 0, the wyvern): +15
+//   - wisp (type 4) vs skeleton (type 10): +15
+//   - lizard (property bit 1) attacking from a water tile: +10
+//   - attacking from the temple tile (index 34): +25
+int matchupOffenceBonus(uint8_t atkType, uint8_t vicType, int atkX, int atkY)
+{
+    int b = 0;
+    if ((UNIT_PROPERTIES[atkType] & (1 << 6)) && (UNIT_PROPERTIES[vicType] & (1 << 0)))
+        b += 15;
+    if (atkType == 4 && vicType == 10)
+        b += 15;
+    uint8_t t = tileAt(atkX, atkY);
+    if ((UNIT_PROPERTIES[atkType] & (1 << 1)) && t < TILE_COUNT && TILE_TERRAIN_TYPE[t] == 5)
+        b += 10;
+    if (t == TEMPLE_TILE)
+        b += 25;
+    return b;
+}
+
+// Ported from Unit.getDefenceBonusAgainstUnitEx(), MINUS the base
+// TERRAIN_DEFENCE_BONUS[tile] term which resolveHit()/wouldGuaranteeKill()
+// already apply. What's left:
+//   - lizard (property bit 1) defending on a water tile: +15
+//   - defending on the temple tile (index 34): +15
+int matchupDefenceBonus(uint8_t vicType, int vicX, int vicY)
+{
+    int b = 0;
+    uint8_t t = tileAt(vicX, vicY);
+    if ((UNIT_PROPERTIES[vicType] & (1 << 1)) && t < TILE_COUNT && TILE_TERRAIN_TYPE[t] == 5)
+        b += 15;
+    if (t == TEMPLE_TILE)
+        b += 15;
+    return b;
+}
+
+// One hit: attackerIdx's roll in [offenceMin, offenceMax) plus any matchup
+// offence bonus, against victimIdx's defence (base + terrain + matchup
+// bonus), scaled by the attacker's current health%. Shared by
+// attackUnit()'s direct hit and its counterattack. Returns the damage
+// dealt, for attackUnit()'s hit-effect animation.
 int resolveHit(int attackerIdx, int victimIdx)
 {
     UnitPlacement &attacker = units[attackerIdx];
     UnitPlacement &victim = units[victimIdx];
 
     int offence = random(UNIT_OFFENCE_MIN[attacker.type], UNIT_OFFENCE_MAX[attacker.type]);
+    offence += matchupOffenceBonus(attacker.type, victim.type, attacker.tileX, attacker.tileY);
     uint8_t victimTile = tileAt(victim.tileX, victim.tileY);
     // Same guard as computeReachable()'s: a corrupt/out-of-range tile index
     // shouldn't read past TILE_TERRAIN_TYPE/TERRAIN_DEFENCE_BONUS -- treat
     // it as no terrain bonus rather than crashing mid-combat.
     int terrainBonus = victimTile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[victimTile]] : 0;
-    int defence = UNIT_DEFENCE[victim.type] + terrainBonus;
+    int defence = UNIT_DEFENCE[victim.type] + terrainBonus +
+                  matchupDefenceBonus(victim.type, victim.tileX, victim.tileY);
 
     int hit = (offence - defence) * attacker.health / 100;
     hit = constrain(hit, 0, (int)victim.health);
@@ -1703,13 +1740,16 @@ constexpr int AI_COLOR = 1;
 // terrain-adjusted defence resolveHit() itself computes, scaled by
 // attacker health the same way. A worst-case-roll kill is a genuinely
 // certain one, not a probability estimate.
-bool wouldGuaranteeKill(uint8_t attackerType, uint8_t attackerHealth, int victimIdx)
+bool wouldGuaranteeKill(uint8_t attackerType, uint8_t attackerHealth, int atkX, int atkY, int victimIdx)
 {
     const UnitPlacement &victim = units[victimIdx];
     uint8_t tile = tileAt(victim.tileX, victim.tileY);
     int terrainBonus = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
-    int defence = UNIT_DEFENCE[victim.type] + terrainBonus;
-    int minHit = (UNIT_OFFENCE_MIN[attackerType] - defence) * attackerHealth / 100;
+    int defence = UNIT_DEFENCE[victim.type] + terrainBonus +
+                  matchupDefenceBonus(victim.type, victim.tileX, victim.tileY);
+    int minOffence = UNIT_OFFENCE_MIN[attackerType] +
+                     matchupOffenceBonus(attackerType, victim.type, atkX, atkY);
+    int minHit = (minOffence - defence) * attackerHealth / 100;
     return minHit >= victim.health;
 }
 
@@ -1734,7 +1774,7 @@ int findAttackTarget(uint8_t type, uint8_t health, int color, int fromX, int fro
         if (!inAttackRangeFrom(type, fromX, fromY, units[i].tileX, units[i].tileY))
             continue;
 
-        bool isKill = wouldGuaranteeKill(type, health, i);
+        bool isKill = wouldGuaranteeKill(type, health, fromX, fromY, i);
         bool better = best < 0 ||
                       (isKill && !bestIsKill) ||
                       (isKill == bestIsKill && units[i].health < units[best].health);
@@ -1901,7 +1941,7 @@ void aiActUnit(int idx)
                 // lookahead (doesn't know if a counter will actually
                 // happen), just a free tiebreak among otherwise equal
                 // attack options.
-                bool isKill = wouldGuaranteeKill(u.type, u.health, tileTarget);
+                bool isKill = wouldGuaranteeKill(u.type, u.health, x, y, tileTarget);
                 uint8_t tile = tileAt(x, y);
                 int defBonus = tile < TILE_COUNT ? TERRAIN_DEFENCE_BONUS[TILE_TERRAIN_TYPE[tile]] : 0;
                 bool better = attackTileX < 0 ||
