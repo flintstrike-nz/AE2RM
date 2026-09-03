@@ -102,20 +102,31 @@ not yet confirmed on-device.
   the background before every frame, the previous frame's opaque pixels
   would smear into the next -- unverified on real hardware whether that
   redraw-per-frame cost makes the animation feel too slow.
-- `m0`'s scripted sprite effects (`playCutsceneSpriteEffect()` in
-  `main.cpp`, new this milestone): `runIntroScript()` now handles the
-  intro's `CreateSpriteAtUnit` commands for real, instead of silently
-  skipping them. Same idea as the hit-flash above -- a numbered sequence
-  of converted frames, redrawing the viewport before each one -- but
-  reused for `RedSpark`/`Spark`/`Smoke` (`spark.png`/`smoke.png`,
-  converted the same per-frame way as `redspark.png`), positioned from
-  the scripted unit's tile plus the command's own pixel offset. Unlike
-  `playHitEffect()`'s statically cached frame buffer (loaded once, reused
-  on every combat hit all game), this loads and frees its buffer per
-  call -- the intro script only triggers a handful of these total, so
-  there's nothing worth keeping cached. `bounceMode` (the command's 4th
-  argument) isn't modeled -- it selects an animation variant this port
-  doesn't distinguish, always playing frames forward once.
+- `m0`'s scripted sprite effects (`spawnCutsceneSpriteEffect()`/
+  `tickCutsceneEffects()` in `main.cpp`, new this milestone):
+  `runIntroScript()` now handles the intro's `CreateSpriteAtUnit` commands
+  for real, instead of silently skipping them -- `RedSpark`/`Spark`/`Smoke`
+  (`spark.png`/`smoke.png`, converted the same per-frame way as
+  `redspark.png`), positioned from the scripted unit's tile. Non-blocking,
+  matching the original's own `showSpriteOnMap()`: `CreateSpriteAtUnit`
+  queues an effect into a small fixed slot table and returns immediately,
+  and the following `Wait` command is what actually ticks and redraws it
+  (in `CUTSCENE_EFFECT_TICK_MS` = 50ms steps, the same cadence
+  `Sprite.update()` runs at) -- so consecutive effects (m0's Spark + Smoke
+  on the same casualty) run concurrently instead of serializing, and
+  `Wait` stays the script's real pacing control instead of each effect
+  adding its own duration on top. Two more details only matter once it's
+  actually ticking: the command's `sx`/`sy` are a per-tick motion delta,
+  not a one-time offset (confirmed in `Sprite.update()`'s default case --
+  `setPosition(currentX + shiftX, currentY + shiftY)` runs every tick, not
+  once -- m0's Smoke uses `(0, -3)` and rises for its whole duration), and
+  `bounceMode` is a repeat count, not an animation variant (decremented
+  each time the frame sequence wraps back to frame 0; m0's `RedSpark`
+  passes `2`, so it loops twice). Unlike `playHitEffect()`'s statically
+  cached frame buffer (loaded once, reused on every combat hit all game),
+  this loads its buffer fresh per tick and frees it once nothing's active
+  -- the intro script only triggers a handful of these total, so there's
+  nothing worth keeping cached.
 - Basic AI (`aiActUnit()` in `main.cpp`): color 1 (red) is always the
   computer, color 0 (blue) is always you -- there's no way to flip this,
   and the two-human hotseat mode from earlier milestones no longer
@@ -253,8 +264,9 @@ not yet confirmed on-device.
   (`ShowDialog`, looked up from `/strings.dat` -- see below -- rendered
   in a bottom text box, blocking on a tap to continue), and plays its
   scripted sprite effects (`CreateSpriteAtUnit`, milestone 17 -- see
-  `playCutsceneSpriteEffect()` above; `RedSpark`/`Spark`/`Smoke` over the
-  named unit's tile, offset by the command's own sx/sy). Every other
+  `spawnCutsceneSpriteEffect()`/`tickCutsceneEffects()` above;
+  `RedSpark`/`Spark`/`Smoke` over the named unit's tile, ticked and
+  animated during the following `Wait`). Every other
   command in that case range (`ShowMapName`, `NextState`,
   `SetFadeEnabled`/`SetFadeValue`, `SetCursorVisible`, `SetMapStepMax`/
   `SetUnitSpeed`, `Vibrate`, `ScheduleUnitAnimationStop`, `StartPlay`) has

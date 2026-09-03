@@ -1102,42 +1102,130 @@ void showTitleScreen()
     free(logo);
 }
 
-// Plays a numbered sequence of RGB565 frame files (/effects/<prefix>_NN.bin,
-// frameCount files of frameW x frameH each -- see convert_assets.py)
-// centered on pixel (centerPx, centerPy), redrawing the viewport before
-// each frame so pushImage()'s transparent-skip doesn't smear the previous
-// frame into the next. Used by runIntroScript() for m0's CreateSpriteAtUnit
-// commands (RedSpark/Spark/Smoke) -- unlike playHitEffect()'s per-frame
-// buffer (cached across many combat hits a turn), frames here are loaded
-// fresh and freed immediately: this only ever runs a handful of times
-// total, once per mission start, so there's nothing worth caching.
-void playCutsceneSpriteEffect(int centerPx, int centerPy, const char *prefix, int frameW, int frameH, int frameCount, unsigned long frameDelayMs)
+// m0's scripted sprite effects (CreateSpriteAtUnit) are non-blocking in the
+// original: showSpriteOnMap()/createSimpleSparkSprite() append the sprite to
+// an active-effects vector and return immediately -- the effect then ticks
+// forward on its own every ~50ms alongside whatever the script does next,
+// so several effects (e.g. m0's Spark + Smoke on the same casualty) run
+// concurrently, and the following Wait is what actually paces the script,
+// not the effect's own duration (verified against Sprite.update()'s default
+// case in Sprite.java: setPosition(currentX + shiftX, currentY + shiftY)
+// every tick, and nextFrame()/bounceMode decrementing only once per full
+// frame-sequence wrap). A small fixed slot table plus tickCutsceneEffects(),
+// called from runIntroScript()'s Wait handling below, reproduces that
+// instead of blocking synchronously inside CreateSpriteAtUnit itself.
+constexpr int MAX_CUTSCENE_EFFECTS = 4;
+constexpr unsigned long CUTSCENE_EFFECT_TICK_MS = 50; // matches Sprite.update()'s own cadence
+struct CutsceneEffect
 {
-    size_t frameBytes = (size_t)frameW * frameH * sizeof(uint16_t);
-    uint16_t *frame = static_cast<uint16_t *>(malloc(frameBytes));
-    int px = centerPx - frameW / 2;
-    int py = centerPy - frameH / 2;
+    bool active = false;
+    const char *prefix = nullptr;
+    int frameW = 0, frameH = 0, frameCount = 0;
+    int currentFrame = 0;
+    int px = 0, py = 0;         // current top-left pixel position
+    int sxPerTick = 0, syPerTick = 0; // added to px/py every tick -- a motion delta, not a one-time offset
+    unsigned long frameDelayMs = 0;
+    unsigned long delayAccumulator = 0;
+    int repeatsRemaining = 0; // bounceMode from the script: number of full frame-sequence loops before stopping
+};
+CutsceneEffect cutsceneEffects[MAX_CUTSCENE_EFFECTS];
 
-    for (int i = 0; i < frameCount; ++i)
+// Queues a numbered sequence of RGB565 frame files (/effects/<prefix>_NN.bin,
+// frameCount files of frameW x frameH each -- see convert_assets.py) to play
+// starting at (centerPx, centerPy), stepping by (sxPerTick, syPerTick) each
+// tick, for repeatCount full loops through its frameCount frames. Returns
+// immediately; tickCutsceneEffects() below drives it forward. Silently
+// dropped if every slot is already in use -- m0 never has more than two
+// effects active at once (Spark + Smoke on the same casualty), so this
+// should never actually happen.
+void spawnCutsceneSpriteEffect(int centerPx, int centerPy, const char *prefix, int frameW, int frameH, int frameCount,
+                                int sxPerTick, int syPerTick, int repeatCount, unsigned long frameDelayMs)
+{
+    for (CutsceneEffect &e : cutsceneEffects)
     {
-        bool ok = false;
-        if (frame)
+        if (e.active)
+            continue;
+        e.active = true;
+        e.prefix = prefix;
+        e.frameW = frameW;
+        e.frameH = frameH;
+        e.frameCount = frameCount;
+        e.currentFrame = 0;
+        e.px = centerPx - frameW / 2;
+        e.py = centerPy - frameH / 2;
+        e.sxPerTick = sxPerTick;
+        e.syPerTick = syPerTick;
+        e.frameDelayMs = frameDelayMs;
+        e.delayAccumulator = 0;
+        e.repeatsRemaining = repeatCount;
+        return;
+    }
+}
+
+bool anyCutsceneEffectActive()
+{
+    for (const CutsceneEffect &e : cutsceneEffects)
+        if (e.active)
+            return true;
+    return false;
+}
+
+// Advances every active effect by one tick (elapsedMs, expected to be
+// CUTSCENE_EFFECT_TICK_MS) and redraws the viewport plus whatever's still
+// active on top of it. Called only from runIntroScript()'s Wait handling,
+// which is the only place m0's script leaves idle time for effects to run
+// in -- so, unlike the original's real-time loop, an effect started right
+// before a ShowDialog/GetUnit/etc. with no following Wait won't animate
+// until the next Wait tick. Always redraws when called (even once every
+// effect has just deactivated) so the last frame doesn't linger on screen
+// through the rest of the wait -- pushImage()'s transparent-skip only
+// omits source pixels, not the previous frame's opaque ones.
+void tickCutsceneEffects(unsigned long elapsedMs)
+{
+    for (CutsceneEffect &e : cutsceneEffects)
+    {
+        if (!e.active)
+            continue;
+        e.px += e.sxPerTick;
+        e.py += e.syPerTick;
+        e.delayAccumulator += elapsedMs;
+        if (e.delayAccumulator >= e.frameDelayMs)
         {
-            char path[40];
-            snprintf(path, sizeof(path), "/effects/%s_%02d.bin", prefix, i);
-            File f = SD_MMC.open(path, FILE_READ);
-            ok = f && f.read(reinterpret_cast<uint8_t *>(frame), frameBytes) == frameBytes;
-            if (f)
-                f.close();
+            e.delayAccumulator -= e.frameDelayMs;
+            e.currentFrame = (e.currentFrame + 1) % e.frameCount;
+            if (e.currentFrame == 0 && --e.repeatsRemaining <= 0)
+                e.active = false;
         }
-        drawViewport();
+    }
+
+    drawViewport();
+    uint16_t *frame = nullptr;
+    size_t frameCap = 0;
+    for (const CutsceneEffect &e : cutsceneEffects)
+    {
+        if (!e.active)
+            continue;
+        size_t frameBytes = (size_t)e.frameW * e.frameH * sizeof(uint16_t);
+        if (frameBytes > frameCap)
+        {
+            free(frame);
+            frame = static_cast<uint16_t *>(malloc(frameBytes));
+            frameCap = frame ? frameBytes : 0;
+        }
+        if (!frame)
+            continue;
+        char path[40];
+        snprintf(path, sizeof(path), "/effects/%s_%02d.bin", e.prefix, e.currentFrame);
+        File f = SD_MMC.open(path, FILE_READ);
+        bool ok = f && f.read(reinterpret_cast<uint8_t *>(frame), frameBytes) == frameBytes;
+        if (f)
+            f.close();
         if (ok)
         {
             gfx.startWrite();
-            gfx.pushImage(px, py, frameW, frameH, frame, TRANSPARENT_565);
+            gfx.pushImage(e.px, e.py, e.frameW, e.frameH, frame, TRANSPARENT_565);
             gfx.endWrite();
         }
-        delay(frameDelayMs);
     }
     free(frame);
 }
@@ -1278,12 +1366,16 @@ void runIntroScript()
         {
             // Args are (name, sx, sy, bounceMode, delay) --
             // createSimpleSparkSprite(sprite, unit.currentX, unit.currentY,
-            // sx, sy, bounceMode, delay) in the original: sx/sy are a
-            // pixel offset from the unit's own position, delay is this
-            // effect's per-frame pacing (matches Wait's role elsewhere in
-            // this script). bounceMode isn't modeled -- it selects an
-            // animation variant this port doesn't distinguish, always
-            // playing the sprite's frames forward once.
+            // sx, sy, bounceMode, delay) in the original. sx/sy are a
+            // per-tick motion delta (Sprite.update()'s default case adds
+            // shiftX/shiftY to the sprite's position every ~50ms, not just
+            // once -- e.g. m0's Smoke uses (0, -3) and rises throughout).
+            // bounceMode is a repeat count, not an animation variant: it's
+            // decremented each time the frame sequence wraps back to 0 and
+            // the effect stops once it hits zero (m0's RedSpark passes 2,
+            // so it loops twice). Spawned non-blocking -- see
+            // spawnCutsceneSpriteEffect()/tickCutsceneEffects() above --
+            // and actually animated by the following Wait command below.
             const char *prefix = nullptr;
             int frameW = 0, frameH = 0, frameCount = 0;
             if (!strcmp(tok[1], "RedSpark"))
@@ -1307,11 +1399,13 @@ void runIntroScript()
             }
             if (prefix)
             {
-                int sx = atoi(tok[2]), sy = atoi(tok[3]);
+                int sxPerTick = atoi(tok[2]), syPerTick = atoi(tok[3]);
+                int repeatCount = atoi(tok[4]);
                 unsigned long frameDelay = (unsigned long)atoi(tok[5]);
-                int centerPx = units[scriptUnit].tileX * TILE_SIZE - viewX + TILE_SIZE / 2 + sx;
-                int centerPy = units[scriptUnit].tileY * TILE_SIZE - viewY + TILE_SIZE / 2 + sy;
-                playCutsceneSpriteEffect(centerPx, centerPy, prefix, frameW, frameH, frameCount, frameDelay);
+                int centerPx = units[scriptUnit].tileX * TILE_SIZE - viewX + TILE_SIZE / 2;
+                int centerPy = units[scriptUnit].tileY * TILE_SIZE - viewY + TILE_SIZE / 2;
+                spawnCutsceneSpriteEffect(centerPx, centerPy, prefix, frameW, frameH, frameCount,
+                                           sxPerTick, syPerTick, repeatCount, frameDelay);
             }
         }
         else if (!strcmp(tok[0], "ShowDialog") && n >= 2)
@@ -1323,15 +1417,29 @@ void runIntroScript()
         {
             // The original paces this against its own tick rate; there's
             // no equivalent tick here, so this is a plain approximate
-            // delay, not a faithful conversion of "N ticks".
+            // delay, not a faithful conversion of "N ticks" -- except that
+            // any CreateSpriteAtUnit effects queued above are ticked and
+            // redrawn during it, so a wait long enough to cover an
+            // effect's duration is what actually plays it, same as the
+            // original's real-time loop advancing the sprite regardless of
+            // the script.
             constexpr unsigned long MS_PER_WAIT_TICK = 80;
-            delay((unsigned long)atoi(tok[1]) * MS_PER_WAIT_TICK);
+            unsigned long totalMs = (unsigned long)atoi(tok[1]) * MS_PER_WAIT_TICK;
+            unsigned long elapsed = 0;
+            while (elapsed < totalMs)
+            {
+                unsigned long step = min(CUTSCENE_EFFECT_TICK_MS, totalMs - elapsed);
+                delay(step);
+                elapsed += step;
+                if (anyCutsceneEffectActive())
+                    tickCutsceneEffects(step);
+            }
         }
         // Every other command in this case range (ShowMapName, NextState,
         // SetFadeEnabled, SetFadeValue, SetCursorVisible, SetMapStepMax,
-        // SetUnitSpeed, Vibrate, ScheduleUnitAnimationStop,
-        // CreateSpriteAtUnit, StartPlay) has no equivalent here -- see this
-        // function's doc comment -- and is silently skipped.
+        // SetUnitSpeed, Vibrate, ScheduleUnitAnimationStop, StartPlay) has
+        // no equivalent here -- see this function's doc comment -- and is
+        // silently skipped.
     }
     f.close();
     if (!otaInProgress)
