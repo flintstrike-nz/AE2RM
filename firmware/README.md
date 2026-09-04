@@ -193,9 +193,12 @@ not yet confirmed on-device.
   so a later recruit can't undo it. A side that started with zero units
   (`m4`/`m6` place no red units) is exempt -- its emptiness isn't a
   defeat. The mission ends once at most one side that started with units
-  still has any. This is a simplification of the original, which ties
-  defeat more to castle capture/`fractionKings` bookkeeping this port
-  doesn't track. The banner names the surviving side in its HUD colour
+  still has any -- with one deliberate exception: the **human** losing
+  its last unit is a terminal defeat immediately, even if two or more AI
+  sides are still fighting, since whatever's left is an AI-vs-AI game the
+  player can neither influence nor watch. This is all a simplification of
+  the original, which ties defeat more to castle capture/`fractionKings`
+  bookkeeping this port doesn't track. The banner names the surviving side in its HUD colour
   ("BLUE WINS" / "RED WINS" on story maps, "GREEN WINS" etc. once a
   skirmish queue has more than two sides), shows **DEFEAT** if the human
   is wiped out while two or more other sides fight on, and **DRAW** if

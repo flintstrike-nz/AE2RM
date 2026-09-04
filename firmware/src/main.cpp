@@ -678,10 +678,13 @@ void checkEndConditions()
             eliminated[c] = true; // latched -- no coming back via recruitment
     }
 
-    // The human losing its last unit ends the mission immediately -- a
-    // defeat. Whatever's left is an AI-vs-AI fight the player can't
-    // influence or even watch (endTurn()'s hand-off loop has no human
-    // slot to return control to), so don't run it out.
+    // The human losing its last unit is a terminal defeat -- the mission
+    // ends here even if two or more AI sides are still fighting. This is
+    // deliberate, not the last-side-standing rule below: whatever's left
+    // is an AI-vs-AI game the player can't influence or even watch
+    // (endTurn()'s hand-off loop has no human slot to return control to),
+    // so there's nothing to play out. winnerColor names the sole
+    // survivor if there is one, else -1 (the banner shows DEFEAT).
     if (startingUnits[HUMAN_COLOR] > 0 && alive[HUMAN_COLOR] == 0)
     {
         gameOver = true;
