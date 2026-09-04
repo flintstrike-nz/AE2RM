@@ -3,12 +3,15 @@
 // effects (CreateSpriteAtUnit).
 //
 // Boots to a title screen (the original's own splash/logo art, see
-// showTitleScreen()), tap to continue, then a mission menu (m0.aem-m7.aem,
-// showing each map's real title when /strings.dat loaded -- see
-// loadStrings() -- else a generic "Mission N" label). Tap one to play: a
-// full-screen briefing card (title + objective text, see
-// showMissionBriefing()) shows first for every mission, tap to start. You
-// are always blue, the computer is always red. m0 additionally runs its
+// showTitleScreen()), tap to continue, then a mission menu with two tabs:
+// the 8 story missions (m0.aem-m7.aem) and the 12 skirmish maps
+// (s0.aem-s11.aem), showing each map's real title when /strings.dat
+// loaded (see loadStrings()) else a generic label. Tap one to play: a
+// full-screen briefing card shows first, tap to start. You are always
+// blue on a story map (the computer is red); on a skirmish map the turn
+// queue and side count come from castle ownership -- you are colour 0
+// (the first castle found), every other side is AI (see
+// buildSkirmishTurnQueue()). m0 additionally runs its
 // mission-script's intro cutscene once at mission start, after the
 // briefing (see runIntroScript()) -- real dialog text, a couple of
 // scripted unit moves/removals, and camera pans; the other 7 maps start
@@ -366,10 +369,23 @@ static int viewY = 0;
 static inline int tileScreenX(int mx) { return mx * TILE_SIZE - viewX; }
 static inline int tileScreenY(int my) { return my * TILE_SIZE - viewY + MAP_VIEW_Y; }
 
-// m0.aem .. m7.aem -- the story maps loadMap()'s hardcoded 2-side turn
-// queue is exact for (see UnitPlacement's comment). Skirmish maps
-// (s0-s11) aren't converted or offered here.
+// m0.aem .. m7.aem -- the story maps, always a hardcoded 2-side fight
+// (see UnitPlacement's comment). s0.aem .. s11.aem -- skirmish maps,
+// whose turn queue and side count startGame() derives from castle
+// ownership (buildSkirmishTurnQueue()).
 constexpr int STORY_MAP_COUNT = 8;
+constexpr int SKIRMISH_MAP_COUNT = 12;
+
+// Every side starts a skirmish with this much gold (the original offers a
+// menu of 500..200000; this port picks one fixed value -- there's no
+// pre-match setup screen). buildSkirmishTurnQueue()'s comment covers the
+// other simplifications.
+constexpr int SKIRMISH_START_GOLD = 2000;
+
+// True while the active game is a skirmish map (s<currentMapIndex>.aem);
+// false for a story map. Set by startGame(), carried in the save, and
+// read by RETRY and the win banner.
+static bool skirmishMode = false;
 
 enum AppState
 {
@@ -1085,14 +1101,28 @@ const char *getScriptString(int id)
     return scriptStrings + scriptStringOffsets[id];
 }
 
-constexpr int MENU_ROW_H = 28;
-constexpr int MENU_ROW_TOP = 50;
-
-// Locale string 121+i is mission i's real title (used by both the mission
-// menu and showMissionBriefing()); 129+i is its objective text (see
-// showMissionBriefing()'s comment) -- MainDisplayable.java's
-// getLocaleString(121 + mission)/getSaveInfoString().
+// Locale string 121+i is story mission i's real title (used by both the
+// mission menu and showMissionBriefing()); 129+i is its objective text
+// (see showMissionBriefing()) -- MainDisplayable.java's
+// getLocaleString(121 + mission)/getSaveInfoString(). 101+i is skirmish
+// map i's name (getLocaleString(101 + var5)).
 constexpr int MISSION_TITLE_STRING_BASE = 121;
+constexpr int SKIRMISH_TITLE_STRING_BASE = 101;
+
+// The mission menu has two tabs -- the 8 story missions and the 12
+// skirmish maps -- because 20 rows don't fit one screen. menuTab
+// persists across returns to the menu.
+enum { MENU_TAB_STORY, MENU_TAB_SKIRMISH };
+static int menuTab = MENU_TAB_STORY;
+
+constexpr int MENU_TAB_Y = 28;
+constexpr int MENU_TAB_H = 16;
+constexpr int MENU_ROW_TOP = 48;
+
+// Skirmish tab packs 12 rows, so its rows are shorter and single-size;
+// the story tab keeps its roomier two-size rows.
+inline int menuRowCount() { return menuTab == MENU_TAB_SKIRMISH ? SKIRMISH_MAP_COUNT : STORY_MAP_COUNT; }
+inline int menuRowH() { return menuTab == MENU_TAB_SKIRMISH ? 22 : 28; }
 
 void drawMenu()
 {
@@ -1100,28 +1130,43 @@ void drawMenu()
     gfx.fillScreen(TFT_BLACK);
     gfx.setTextSize(2);
     gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-    gfx.setCursor(20, 10);
+    gfx.setCursor(20, 6);
     gfx.print("AE2RM");
-    gfx.setTextSize(1);
-    gfx.setCursor(20, 30);
-    gfx.print("select a mission");
+
+    // Tabs.
+    const char *tabLabel[2] = {"STORY", "SKIRMISH"};
+    int tabW = (DISPLAY_WIDTH - 40) / 2;
+    for (int t = 0; t < 2; ++t)
+    {
+        int tx = 20 + t * tabW;
+        bool active = (t == menuTab);
+        gfx.fillRect(tx, MENU_TAB_Y, tabW - 4, MENU_TAB_H, active ? TFT_WHITE : TFT_DARKGREY);
+        gfx.setTextSize(1);
+        gfx.setTextColor(active ? TFT_BLACK : TFT_WHITE, active ? TFT_WHITE : TFT_DARKGREY);
+        gfx.setCursor(tx + 8, MENU_TAB_Y + 4);
+        gfx.print(tabLabel[t]);
+    }
 
     // loadStrings() is called once from setup(), so this is just a lookup,
     // not a fresh SD read per row. A missing/failed-to-load strings.dat
-    // falls back to a generic "Mission N" label instead of an empty row.
-    for (int i = 0; i < STORY_MAP_COUNT; ++i)
+    // falls back to a generic label instead of an empty row.
+    bool skirmish = (menuTab == MENU_TAB_SKIRMISH);
+    int rowH = menuRowH();
+    int textSize = skirmish ? 1 : 2;
+    int base = skirmish ? SKIRMISH_TITLE_STRING_BASE : MISSION_TITLE_STRING_BASE;
+    for (int i = 0; i < menuRowCount(); ++i)
     {
-        int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
-        gfx.fillRect(20, rowY, DISPLAY_WIDTH - 40, MENU_ROW_H - 6, TFT_DARKGREY);
-        gfx.drawRect(20, rowY, DISPLAY_WIDTH - 40, MENU_ROW_H - 6, TFT_WHITE);
-        gfx.setTextSize(2);
+        int rowY = MENU_ROW_TOP + i * rowH;
+        gfx.fillRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, TFT_DARKGREY);
+        gfx.drawRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, TFT_WHITE);
+        gfx.setTextSize(textSize);
         gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
-        gfx.setCursor(30, rowY + 6);
-        const char *title = getScriptString(MISSION_TITLE_STRING_BASE + i);
+        gfx.setCursor(30, rowY + (skirmish ? 4 : 6));
+        const char *title = getScriptString(base + i);
         if (title[0])
             gfx.print(title);
         else
-            gfx.printf("Mission %d", i + 1);
+            gfx.printf(skirmish ? "Skirmish %d" : "Mission %d", i + 1);
     }
     gfx.endWrite();
 }
@@ -1287,6 +1332,36 @@ void showMissionBriefing(int mapIndex)
     gfx.print("[tap to start]");
     gfx.endWrite();
 
+    waitForTapRelease();
+}
+
+// The skirmish equivalent of showMissionBriefing(): skirmish maps have no
+// per-map objective text (the original shows a generic "defeat all
+// enemies" card, locale strings 71/137), so this just names the map and
+// the side count. Blocks on tap-to-start.
+void showSkirmishBriefing(int mapIndex)
+{
+    const char *name = scriptStrings ? getScriptString(SKIRMISH_TITLE_STRING_BASE + mapIndex) : "";
+    gfx.startWrite();
+    gfx.fillScreen(TFT_BLACK);
+    gfx.setTextSize(2);
+    gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+    gfx.setCursor(10, 40);
+    gfx.printf("SKIRMISH %d", mapIndex + 1);
+    gfx.setTextSize(1);
+    if (name[0])
+    {
+        gfx.setCursor(10, 66);
+        gfx.print(name);
+    }
+    gfx.setCursor(10, 90);
+    gfx.printf("%d sides -- you are %s", turnQueueLen, PLAYER_NAME[HUMAN_COLOR]);
+    gfx.setCursor(10, 104);
+    gfx.print("last side standing wins");
+    gfx.setTextColor(TFT_YELLOW, TFT_BLACK);
+    gfx.setCursor(10, DISPLAY_HEIGHT - 20);
+    gfx.print("[tap to start]");
+    gfx.endWrite();
     waitForTapRelease();
 }
 
@@ -1709,25 +1784,106 @@ void recountStartingUnits()
             startingUnits[units[i].color]++;
 }
 
-// Loads m<mapIndex>.aem and resets all per-game state, then switches to
-// STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
-// across maps and are deliberately NOT reset here. Returns false (and
-// bounces to the mission menu) if the map can't be loaded.
+// Turns a freshly-loaded skirmish map into a playable N-side game, the
+// way MainDisplayable.loadLevel() does for skirmishMode == 1:
+//   - Walk the tiles in column-major order; each time a castle belonging
+//     to a fraction (1-4) not seen yet appends that fraction to the turn
+//     queue. Queue position becomes that side's colour, so turnQueue[]
+//     ends up the identity {0,1,..} and the colour<->fraction mapping is
+//     what actually varies per map.
+//   - Rewrite every fraction building's encoded owner from its raw
+//     fraction to that fraction's queue position (+1), or to neutral if
+//     the fraction holds no castle (so it never took a queue slot).
+//   - Remap each unit's colour the same way; drop units whose fraction
+//     isn't in the queue.
+// Simplifications vs. the original (which has a full pre-match setup
+// screen): colour 0 -- the first castle found in the scan -- is always
+// the human, the rest are AI; there's no team grouping, unit-type cap,
+// or configurable start gold. Returns false if fewer than two fractions
+// hold a castle (not a valid skirmish map).
+bool buildSkirmishTurnQueue()
+{
+    int posOfFraction[5]; // fraction 1..4 -> queue position, -1 if absent
+    for (int i = 0; i < 5; ++i)
+        posOfFraction[i] = -1;
+    turnQueueLen = 0;
+
+    for (int x = 0; x < mapWidth; ++x)
+        for (int y = 0; y < mapHeight; ++y)
+        {
+            uint8_t t = mapTiles[x * mapHeight + y];
+            if (!isFractionBuilding(t) || TILE_TERRAIN_TYPE[t] != 9) // castle only
+                continue;
+            int frac = buildingFraction(t); // 0 neutral, 1-4 team
+            if (frac <= 0 || frac > 4 || posOfFraction[frac] >= 0)
+                continue;
+            if (turnQueueLen >= MAX_PLAYERS)
+                continue; // >4 castle-holding sides: unsupported, ignore the rest
+            posOfFraction[frac] = turnQueueLen;
+            turnQueue[turnQueueLen] = (uint8_t)turnQueueLen;
+            ++turnQueueLen;
+        }
+
+    if (turnQueueLen < 2)
+    {
+        Serial.printf("skirmish: only %d castle-holding side(s) -- not playable\n", turnQueueLen);
+        return false;
+    }
+
+    // Remap building ownership: raw fraction -> queue position (+1), or
+    // neutral for a fraction with no castle.
+    for (int i = 0; i < mapWidth * mapHeight; ++i)
+    {
+        uint8_t t = mapTiles[i];
+        if (!isFractionBuilding(t))
+            continue;
+        int frac = buildingFraction(t);
+        if (frac <= 0)
+            continue; // already neutral
+        int pos = (frac <= 4) ? posOfFraction[frac] : -1;
+        mapTiles[i] = setBuildingFraction(t, pos < 0 ? 0 : pos + 1);
+    }
+
+    // Remap unit colours the same way; drop units of a fraction that
+    // never took a queue slot.
+    int w = 0;
+    for (int r = 0; r < unitCount; ++r)
+    {
+        int frac = units[r].color + 1; // raw colour slot 0-3 -> fraction 1-4
+        int pos = (frac >= 1 && frac <= 4) ? posOfFraction[frac] : -1;
+        if (pos < 0)
+            continue;
+        units[w] = units[r];
+        units[w].color = (uint8_t)pos;
+        ++w;
+    }
+    unitCount = w;
+
+    Serial.printf("skirmish: %d sides, %d units\n", turnQueueLen, unitCount);
+    return true;
+}
+
+// Loads m<mapIndex>.aem (or s<mapIndex>.aem when `skirmish`) and resets
+// all per-game state, then switches to STATE_PLAYING. Asset caches
+// (tiles/unit icons) are content-independent across maps and are
+// deliberately NOT reset here. Returns false (and bounces to the mission
+// menu) if the map can't be loaded, or a skirmish map has fewer than two
+// castle-holding sides.
 //
 // interactive: normal mission start -- show the full-screen briefing and,
 // on m0, play the intro cutscene. loadGame() passes false: it only needs
 // the terrain reloaded before it overwrites the live state, and both
 // mission-start screens already ran when the save was first started.
-bool startGame(int mapIndex, bool interactive = true)
+bool startGame(int mapIndex, bool interactive = true, bool skirmish = false)
 {
     char path[24];
-    snprintf(path, sizeof(path), "/maps/m%d.aem", mapIndex);
+    snprintf(path, sizeof(path), skirmish ? "/maps/s%d.aem" : "/maps/m%d.aem", mapIndex);
 
     gfx.fillScreen(TFT_BLACK);
     gfx.setTextSize(2);
     gfx.setTextColor(TFT_WHITE, TFT_BLACK);
     gfx.setCursor(10, 10);
-    gfx.printf("loading mission %d...", mapIndex + 1);
+    gfx.printf(skirmish ? "loading skirmish %d..." : "loading mission %d...", mapIndex + 1);
 
     if (!loadMap(path))
     {
@@ -1745,6 +1901,7 @@ bool startGame(int mapIndex, bool interactive = true)
     }
 
     currentMapIndex = mapIndex;
+    skirmishMode = skirmish;
     currentTurn = HUMAN_COLOR;
     selectedUnit = -1;
     infoUnit = -1;
@@ -1755,16 +1912,37 @@ bool startGame(int mapIndex, bool interactive = true)
     shopBuyType = -1;
     for (int c = 0; c < MAX_PLAYERS; ++c)
     {
-        gold[c] = 0; // story maps start every side at 0 in the original
+        gold[c] = 0;
         eliminated[c] = false;
     }
 
-    // Story maps m0-m7 are always a 2-side blue-vs-red fight (see the
-    // team-colour note in the README). Skirmish maps will derive a
-    // longer queue from castle ownership here.
-    turnQueue[0] = 0;
-    turnQueue[1] = 1;
-    turnQueueLen = 2;
+    if (skirmish)
+    {
+        // Derive the turn queue (and remap building/unit ownership) from
+        // castle control -- see buildSkirmishTurnQueue().
+        if (!buildSkirmishTurnQueue())
+        {
+            gfx.fillScreen(TFT_BLACK);
+            gfx.setTextSize(2);
+            gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+            gfx.setCursor(10, 10);
+            gfx.print("bad skirmish map");
+            delay(2000);
+            appState = STATE_MENU;
+            drawMenu();
+            return false;
+        }
+        for (int c = 0; c < turnQueueLen; ++c)
+            gold[c] = SKIRMISH_START_GOLD;
+    }
+    else
+    {
+        // Story maps m0-m7 are always a 2-side blue-vs-red fight (see the
+        // team-colour note in the README), starting at 0 gold.
+        turnQueue[0] = 0;
+        turnQueue[1] = 1;
+        turnQueueLen = 2;
+    }
 
     // Start the camera on the human player's king (color 0), like the
     // original does -- several maps place your side well down/right of the
@@ -1784,7 +1962,12 @@ bool startGame(int mapIndex, bool interactive = true)
     centerViewOnTile(focusX, focusY);
 
     if (interactive)
-        showMissionBriefing(mapIndex);
+    {
+        if (skirmish)
+            showSkirmishBriefing(mapIndex);
+        else
+            showMissionBriefing(mapIndex);
+    }
 
     recountStartingUnits(); // so the first render's footer tally isn't blank
 
@@ -1792,7 +1975,7 @@ bool startGame(int mapIndex, bool interactive = true)
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
-    if (mapIndex == 0 && interactive)
+    if (mapIndex == 0 && interactive && !skirmish)
     {
         runIntroScript(); // only m0 has a mission-script file -- see its comment
         recountStartingUnits(); // the intro repositions/removes units
@@ -1803,12 +1986,26 @@ bool startGame(int mapIndex, bool interactive = true)
 
 void handleMenuTap(int screenX, int screenY)
 {
-    for (int i = 0; i < STORY_MAP_COUNT; ++i)
+    // Tab bar.
+    if (screenY >= MENU_TAB_Y && screenY < MENU_TAB_Y + MENU_TAB_H)
     {
-        int rowY = MENU_ROW_TOP + i * MENU_ROW_H;
-        if (screenX >= 20 && screenX < DISPLAY_WIDTH - 20 && screenY >= rowY && screenY < rowY + MENU_ROW_H - 6)
+        int tabW = (DISPLAY_WIDTH - 40) / 2;
+        int t = (screenX - 20) / tabW;
+        if (t >= 0 && t <= 1 && t != menuTab)
         {
-            startGame(i);
+            menuTab = t;
+            drawMenu();
+        }
+        return;
+    }
+
+    int rowH = menuRowH();
+    for (int i = 0; i < menuRowCount(); ++i)
+    {
+        int rowY = MENU_ROW_TOP + i * rowH;
+        if (screenX >= 20 && screenX < DISPLAY_WIDTH - 20 && screenY >= rowY && screenY < rowY + rowH - 6)
+        {
+            startGame(i, true, menuTab == MENU_TAB_SKIRMISH);
             return;
         }
     }
@@ -2544,7 +2741,7 @@ void handleTap(int screenX, int screenY)
     {
         if (inRect(RETRY_BTN_X, RETRY_BTN_Y, RETRY_BTN_W, RETRY_BTN_H))
         {
-            startGame(currentMapIndex);
+            startGame(currentMapIndex, true, skirmishMode);
             return;
         }
         // Any other tap while the win banner is up returns to the menu.
@@ -2796,12 +2993,13 @@ void drawHud()
 
 // --- Save / load ------------------------------------------------------
 // A single NVS slot ("aeii"/"save"): a flat snapshot of the mission in
-// progress, enough to resume a story map exactly -- units, turn, gold,
-// camera, AND the live tile grid (so captured villages/castles keep their
-// new owner). Skirmish state and mission-script progress aren't covered
-// (no skirmish here; m0's cutscene only runs at mission start, and
+// progress, enough to resume a story or skirmish map exactly -- units,
+// turn, per-side gold, the turn queue, camera, AND the live tile grid
+// (so captured villages/castles keep their new owner, and a skirmish
+// map's queue-remapped building fractions survive). Mission-script
+// progress isn't covered (m0's cutscene only runs at mission start, and
 // loadGame() suppresses it).
-constexpr int SAVE_MAX_TILES = 2048; // every story map is well under this
+constexpr int SAVE_MAX_TILES = 2048; // every story/skirmish map is well under this
 struct SaveBlob
 {
     uint32_t magic;
@@ -2817,10 +3015,11 @@ struct SaveBlob
     uint8_t elim[MAX_PLAYERS];      // latched per-side defeat
     uint8_t over;
     int8_t winner;
+    uint8_t skirmish;               // 0 = story map (m<idx>), 1 = skirmish (s<idx>)
     UnitPlacement units[MAX_UNITS];
     uint8_t tiles[SAVE_MAX_TILES];
 };
-constexpr uint32_t SAVE_MAGIC = 0x41453205; // "AE2", format 5 (N-player turn queue)
+constexpr uint32_t SAVE_MAGIC = 0x41453206; // "AE2", format 6 (skirmish flag)
 
 bool hasSavedGame()
 {
@@ -2859,6 +3058,7 @@ bool saveGame()
     b.mapCells = (int32_t)cells;
     b.over = gameOver ? 1 : 0;
     b.winner = (int8_t)winnerColor;
+    b.skirmish = skirmishMode ? 1 : 0;
     memcpy(b.units, units, sizeof(units));
     memcpy(b.tiles, mapTiles, cells);
 
@@ -2879,8 +3079,10 @@ bool loadGame()
     b = SaveBlob{};
     size_t n = p.getBytes("save", &b, sizeof(b));
     p.end();
+    bool loadSkirmish = b.skirmish != 0;
+    int mapLimit = loadSkirmish ? SKIRMISH_MAP_COUNT : STORY_MAP_COUNT;
     if (n != sizeof(b) || b.magic != SAVE_MAGIC ||
-        b.mapIndex < 0 || b.mapIndex >= STORY_MAP_COUNT ||
+        b.mapIndex < 0 || b.mapIndex >= mapLimit ||
         b.count < 0 || b.count > MAX_UNITS)
         return false;
 
@@ -2910,8 +3112,11 @@ bool loadGame()
     // first started). If the map won't load, or its size no longer
     // matches the snapshot (assets changed under an old save), bail
     // *before* touching live state -- startGame() has already bounced to
-    // the mission menu.
-    if (!startGame((int)b.mapIndex, false)) // already bounced to the menu
+    // the mission menu. startGame() also rebuilds a skirmish queue from
+    // the fresh map, but the memcpy of saved tiles + the queue/unit
+    // restore below overwrite that with the snapshot's authoritative
+    // state.
+    if (!startGame((int)b.mapIndex, false, loadSkirmish)) // already bounced to the menu
         return false;
     if (!mapTiles || b.mapCells != (int32_t)((size_t)mapWidth * mapHeight))
     {
