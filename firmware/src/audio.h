@@ -3,9 +3,12 @@
 // agreed scope -- this does NOT parse the original MIDI tracks, it plays
 // short hand-written loops and sound effects.
 //
-// Everything here is best-effort: audioInit() returns false if the codec
-// or I2S won't come up (wrong pin, no board), and every other call then
-// no-ops, so a mis-transcribed pinout can't do worse than silence.
+// Everything here is best-effort: audioInit() returns false if the ES8311
+// doesn't ACK on I2C or the I2S driver won't install, and every other
+// call then no-ops. Note this does actively drive the I2S + amp GPIOs
+// (4/5/6/7/8, 1) before it knows they're right -- see board_pins.h's
+// warning about a wrong pin contending with another peripheral; those
+// lines are otherwise unused on this board.
 //
 // NOTE: unverified on hardware. This environment can flash the board and
 // read its boot log but has no way to hear the output, so the ES8311

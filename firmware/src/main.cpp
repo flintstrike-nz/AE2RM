@@ -1084,6 +1084,7 @@ void walkUnitTo(int unitIdx, int destX, int destY)
     UnitPlacement &u = units[unitIdx];
     if (appState == STATE_PLAYING && !(u.tileX == destX && u.tileY == destY))
     {
+        audioSfx(SFX_MOVE); // every actual move -- human plain/move-then-attack and AI
         uint8_t path[24][2];
         int n = reconstructPath(u.tileX, u.tileY, destX, destY, path, 24);
         constexpr unsigned long STEP_MS = 55;
@@ -2090,7 +2091,8 @@ bool startGame(int mapIndex, bool interactive = true, bool skirmish = false)
     recountStartingUnits(); // so the first render's footer tally isn't blank
 
     appState = STATE_PLAYING;
-    audioMusic(MUSIC_BATTLE);
+    if (interactive)
+        audioMusic(MUSIC_BATTLE); // the load path sets it after restoring gameOver -- see loadGame()
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
@@ -2989,7 +2991,6 @@ void handleTap(int screenX, int screenY)
         {
             int16_t fromX = sel.tileX, fromY = sel.tileY;
             uint8_t destBefore = tileAt(mx, my);
-            audioSfx(SFX_MOVE);
             walkUnitTo(mv, mx, my);
             sel.hasMoved = true;
             tryCaptureBuilding(sel);
@@ -3361,6 +3362,7 @@ bool loadGame()
     viewX = b.viewX;
     viewY = b.viewY;
     clampView();
+    audioMusic(gameOver ? MUSIC_OFF : MUSIC_BATTLE); // now that the saved terminal state is restored
     return true;
 }
 
