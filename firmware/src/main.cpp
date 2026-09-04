@@ -2849,8 +2849,15 @@ void handleTap(int screenX, int screenY)
         drawViewport();
         return;
     }
-    // Any tap that isn't the UNDO button ends the undo window.
-    clearUndo();
+    // Any tap that isn't the UNDO button ends the undo window. Repaint
+    // right away so the button disappears even on tap paths that would
+    // otherwise return without their own redraw (empty ground, off-map,
+    // a missed footer button).
+    if (undoUnitIdx >= 0)
+    {
+        clearUndo();
+        drawViewport();
+    }
 
     if (inRect(MENU_BTN_X, MENU_BTN_Y, ICON_BTN, ICON_BTN))
     {
