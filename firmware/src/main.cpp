@@ -20,14 +20,16 @@
 // -- its movement range highlights cyan (terrain-cost-limited flood fill)
 // and every enemy it could attack this turn (from where it stands or
 // after moving within that range) highlights red. Tap a cyan tile to move
-// there (capturing a village/castle you move onto, if this unit type
-// can), tap a red-highlighted enemy to attack it, stepping into range
-// first if needed (one action per unit per turn: a move, or a
-// move-then-attack, matching the original). A unit that has used its
-// action is greyed out until next turn. Every hit -- and the
-// counterattack, if it happens -- plays the original's own spark effect
-// and a damage number over the target (see playHitEffect()), paced so
-// both are actually visible. Tap
+// there (the unit walks the path a tile at a time -- walkUnitTo() --
+// capturing a village/castle you move onto, if this unit type can), tap a
+// red-highlighted enemy to attack it, stepping into range first if needed
+// (one action per unit per turn: a move, or a move-then-attack, matching
+// the original). Right after a plain move an UNDO button (footer-left)
+// puts the unit back and un-spends its turn, until you do anything else.
+// A unit that has used its action is greyed out until next turn. Every
+// hit -- and the counterattack, if it happens -- plays the original's own
+// spark effect and a rising damage number over the target (see
+// playHitEffect()), paced so both are actually visible. Tap
 // "END TURN" to pass to the AI, which immediately plays its whole turn
 // (attack a guaranteed kill if one's in range, else the weakest in-range
 // enemy, else move-and-attack, else retreat if critically low on health,
@@ -327,6 +329,14 @@ static int selectedUnit = -1; // index into units[], or -1 if none selected
 // act with. Cleared by tapping empty ground, the MENU/END TURN buttons,
 // or selecting a movable unit.
 static int infoUnit = -1;
+
+// One-deep move undo. After a plain move (the unit walked to an empty
+// tile -- no capture, no attack) the player can put it back and re-spend
+// its turn. undoUnitIdx >= 0 means an undo is available; it's cleared by
+// any other action (see clearUndo() and handleTap()).
+static int undoUnitIdx = -1;
+static int16_t undoFromX = 0, undoFromY = 0;
+inline void clearUndo() { undoUnitIdx = -1; }
 
 // The original's localized string table (PaintableObject.getLocaleString()),
 // copied as-is to /strings.dat by convert_assets.py. Loaded once (see
@@ -865,26 +875,36 @@ void playHitEffect(int unitIdx, int hit)
     snprintf(label, sizeof(label), "-%d", hit);
     int sparkX = px + (TILE_SIZE - SPARK_FRAME_W) / 2;
     int sparkY = py + (TILE_SIZE - SPARK_FRAME_H) / 2;
-    // Keep the damage label inside the map strip (a unit on the top row
-    // would otherwise put it up in the header).
-    int labelY = py >= MAP_VIEW_Y + 10 ? py - 10 : py + TILE_SIZE;
+    // The damage number starts by the unit and drifts up ~2px/frame as it
+    // plays, dimming over the last few frames -- the original's rise-and-
+    // fade, approximated (this panel has no alpha, so "fade" is a step
+    // down through two greys). A unit on the top rows drifts down instead
+    // so the number doesn't climb into the header.
+    bool riseUp = py >= MAP_VIEW_Y + 24;
+    int labelBaseY = riseUp ? py - 4 : py + TILE_SIZE - 6;
+    constexpr int LABEL_TAIL_FRAMES = 3; // label-only frames after the spark ends
+    constexpr int TOTAL_FRAMES = SPARK_FRAME_COUNT + LABEL_TAIL_FRAMES;
 
-    for (int frame = 0; frame < SPARK_FRAME_COUNT; ++frame)
+    for (int frame = 0; frame < TOTAL_FRAMES; ++frame)
     {
         // A full redraw each frame, not just erasing the spark rect: pushImage()
         // only skips transparent source pixels, so without resetting the
         // background first, the previous frame's opaque pixels would smear
-        // into the next.
+        // into the next. The full redraw also clears the label's previous
+        // (lower) position for free as it rises.
         drawViewport();
         gfx.startWrite();
         gfx.setClipRect(0, MAP_VIEW_Y, DISPLAY_WIDTH, MAP_VIEW_H); // don't let the spark/label spill into the HUD
-        if (sheetOk)
+        if (sheetOk && frame < SPARK_FRAME_COUNT)
             gfx.pushImage(sparkX, sparkY, SPARK_FRAME_W, SPARK_FRAME_H,
                            sheet + (size_t)frame * FRAME_PIXELS, TRANSPARENT_565);
+        int labelY = labelBaseY + (riseUp ? -2 : 2) * frame;
+        uint16_t labelColor = frame < SPARK_FRAME_COUNT ? TFT_WHITE
+                              : frame < TOTAL_FRAMES - 1 ? 0xC618 /* light grey */
+                                                        : 0x8410 /* mid grey */;
         gfx.setTextSize(1);
-        gfx.fillRect(px, labelY, 26, 10, TFT_BLACK);
-        gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-        gfx.setCursor(px + 1, labelY + 1);
+        gfx.setTextColor(labelColor, TFT_BLACK);
+        gfx.setCursor(px + 1, labelY);
         gfx.print(label);
         gfx.clearClipRect();
         gfx.endWrite();
@@ -986,6 +1006,91 @@ void computeReachable(const UnitPlacement &u)
             }
         }
     }
+}
+
+void drawViewport();
+
+// Rebuilds the tile-by-tile path from (sx,sy) to (dx,dy) that
+// computeReachable() implies, by walking the reachableCost gradient
+// backward from the destination: a predecessor tile holds exactly
+// `reachableCost[cur] + moveCost(cur)`. Writes the steps *after* the
+// start, in order, into path[0..n) and returns n (0 if the gradient
+// doesn't lead back to the start -- caller should just jump). Bounded by
+// the unit's move range, so the fixed scratch buffer is ample.
+int reconstructPath(int sx, int sy, int dx, int dy, uint8_t path[][2], int maxSteps)
+{
+    if (!reachableCost || !inMapBounds(dx, dy) || reachableCost[dx * mapHeight + dy] < 0)
+        return 0;
+    static const int DX[4] = {1, -1, 0, 0};
+    static const int DY[4] = {0, 0, 1, -1};
+    uint8_t rev[32][2];
+    int n = 0;
+    int cx = dx, cy = dy;
+    while (!(cx == sx && cy == sy) && n < (int)(sizeof(rev) / sizeof(rev[0])))
+    {
+        rev[n][0] = (uint8_t)cx;
+        rev[n][1] = (uint8_t)cy;
+        ++n;
+        uint8_t t = tileAt(cx, cy);
+        int curCost = t < TILE_COUNT ? TERRAIN_MOVE_COST[TILE_TERRAIN_TYPE[t]] : 99;
+        int want = reachableCost[cx * mapHeight + cy] + curCost;
+        int bx = -1, by = -1, bestToStart = INT32_MAX;
+        for (int d = 0; d < 4; ++d)
+        {
+            int nx = cx + DX[d], ny = cy + DY[d];
+            if (!inMapBounds(nx, ny) || reachableCost[nx * mapHeight + ny] != want)
+                continue;
+            int toStart = abs(nx - sx) + abs(ny - sy); // prefer a direct-looking path
+            if (toStart < bestToStart)
+            {
+                bestToStart = toStart;
+                bx = nx;
+                by = ny;
+            }
+        }
+        if (bx < 0)
+            return 0; // gradient broke
+        cx = bx;
+        cy = by;
+    }
+    if (!(cx == sx && cy == sy))
+        return 0;
+    int out = 0;
+    for (int i = n - 1; i >= 0 && out < maxSteps; --i, ++out)
+    {
+        path[out][0] = rev[i][0];
+        path[out][1] = rev[i][1];
+    }
+    return out;
+}
+
+// Moves units[unitIdx] to (destX,destY), stepping it along the path one
+// tile at a time with a short delay so the move reads as walking rather
+// than teleporting (the original paces movement too, via SetUnitSpeed).
+// Falls back to a straight jump if the path can't be rebuilt. The caller
+// still owns hasMoved / capture / attack afterwards.
+void walkUnitTo(int unitIdx, int destX, int destY)
+{
+    UnitPlacement &u = units[unitIdx];
+    if (appState == STATE_PLAYING && !(u.tileX == destX && u.tileY == destY))
+    {
+        uint8_t path[24][2];
+        int n = reconstructPath(u.tileX, u.tileY, destX, destY, path, 24);
+        constexpr unsigned long STEP_MS = 55;
+        for (int i = 0; i < n; ++i)
+        {
+            u.tileX = (int16_t)path[i][0];
+            u.tileY = (int16_t)path[i][1];
+            int px = tileScreenX(u.tileX), py = tileScreenY(u.tileY);
+            if (px < 0 || px > DISPLAY_WIDTH - TILE_SIZE ||
+                py < MAP_VIEW_Y || py > MAP_VIEW_Y + MAP_VIEW_H - TILE_SIZE)
+                centerViewOnTile(u.tileX, u.tileY);
+            drawViewport();
+            delay(STEP_MS);
+        }
+    }
+    u.tileX = (int16_t)destX;
+    u.tileY = (int16_t)destY;
 }
 
 void drawViewport();
@@ -1902,6 +2007,7 @@ bool startGame(int mapIndex, bool interactive = true, bool skirmish = false)
 
     currentMapIndex = mapIndex;
     skirmishMode = skirmish;
+    clearUndo();
     currentTurn = HUMAN_COLOR;
     selectedUnit = -1;
     infoUnit = -1;
@@ -2296,8 +2402,7 @@ void aiActUnit(int idx)
 
     if (moveToX >= 0)
     {
-        u.tileX = (int16_t)moveToX;
-        u.tileY = (int16_t)moveToY;
+        walkUnitTo(idx, moveToX, moveToY);
         tryCaptureBuilding(u);
     }
     u.hasMoved = true;
@@ -2412,6 +2517,7 @@ void applyTurnHealing(int color)
 // that side its turn-start income and healing and un-move its units.
 void switchTurn()
 {
+    clearUndo(); // an undo never survives the turn it was made in
     int pos = 0;
     for (int i = 0; i < turnQueueLen; ++i)
         if (turnQueue[i] == currentTurn)
@@ -2503,6 +2609,13 @@ constexpr int MENU_BTN_W = ICON_BTN;
 constexpr int MENU_BTN_H = ICON_BTN;
 constexpr int MENU_BTN_X = SHOP_BTN_X - ICON_BTN - ICON_GAP;
 constexpr int MENU_BTN_Y = ICON_BTN_Y;
+
+// UNDO -- footer-left, only shown (and only tappable) right after a plain
+// move, in the space the stat panel / tally would otherwise use.
+constexpr int UNDO_BTN_X = 5;
+constexpr int UNDO_BTN_Y = ICON_BTN_Y;
+constexpr int UNDO_BTN_W = 52;
+constexpr int UNDO_BTN_H = ICON_BTN;
 
 // Win/loss banner geometry, and its RETRY button -- shared between
 // drawViewport() (drawing it) and handleTap() (hit-testing it), so both
@@ -2720,6 +2833,25 @@ void handleTap(int screenX, int screenY)
         return;
     }
 
+    if (undoUnitIdx >= 0 && inRect(UNDO_BTN_X, UNDO_BTN_Y, UNDO_BTN_W, UNDO_BTN_H))
+    {
+        int i = undoUnitIdx;
+        clearUndo();
+        if (i < unitCount && units[i].alive)
+        {
+            units[i].tileX = undoFromX;
+            units[i].tileY = undoFromY;
+            units[i].hasMoved = false;
+            infoUnit = -1;
+            selectedUnit = i;
+            computeReachable(units[i]);
+        }
+        drawViewport();
+        return;
+    }
+    // Any tap that isn't the UNDO button ends the undo window.
+    clearUndo();
+
     if (inRect(MENU_BTN_X, MENU_BTN_Y, ICON_BTN, ICON_BTN))
     {
         selectedUnit = infoUnit = -1;
@@ -2786,14 +2918,17 @@ void handleTap(int screenX, int screenY)
     if (selectedUnit >= 0)
     {
         int targetIdx = unitIndexAt(mx, my);
-        UnitPlacement &sel = units[selectedUnit];
+        int mv = selectedUnit;
+        selectedUnit = -1; // so walkUnitTo()'s per-step redraws drop the move/attack highlights
+        UnitPlacement &sel = units[mv];
         bool tappedEnemy = targetIdx >= 0 && units[targetIdx].color != currentTurn;
 
         if (tappedEnemy && inAttackRange(sel, mx, my))
         {
             // Already in range -- attack from where it stands.
-            attackUnit(selectedUnit, targetIdx);
+            attackUnit(mv, targetIdx);
             sel.hasMoved = true;
+            clearUndo();
         }
         else if (tappedEnemy)
         {
@@ -2802,11 +2937,11 @@ void handleTap(int screenX, int screenY)
             int ax, ay;
             if (findAttackApproachTile(sel, targetIdx, ax, ay))
             {
-                sel.tileX = (int16_t)ax;
-                sel.tileY = (int16_t)ay;
+                walkUnitTo(mv, ax, ay);
                 tryCaptureBuilding(sel);
-                attackUnit(selectedUnit, targetIdx);
+                attackUnit(mv, targetIdx);
                 sel.hasMoved = true;
+                clearUndo();
             }
             else
             {
@@ -2815,10 +2950,22 @@ void handleTap(int screenX, int screenY)
         }
         else if (reachableCost && reachableCost[mx * mapHeight + my] >= 0 && targetIdx < 0)
         {
-            sel.tileX = (int16_t)mx;
-            sel.tileY = (int16_t)my;
+            int16_t fromX = sel.tileX, fromY = sel.tileY;
+            uint8_t destBefore = tileAt(mx, my);
+            walkUnitTo(mv, mx, my);
             sel.hasMoved = true;
             tryCaptureBuilding(sel);
+            // Offer an undo only for a plain move: a capture flips
+            // building ownership (and its income), which undo doesn't
+            // restore, so a move that captured is committed.
+            if (tileAt(mx, my) == destBefore)
+            {
+                undoUnitIdx = mv;
+                undoFromX = fromX;
+                undoFromY = fromY;
+            }
+            else
+                clearUndo();
         }
         else if (targetIdx >= 0)
         {
@@ -2997,6 +3144,18 @@ void drawHud()
             gfx.printf("%d", aliveByColor[c]);
             first = false;
         }
+    }
+
+    // UNDO -- drawn last, over the footer-left area, only while a plain
+    // move can still be taken back.
+    if (undoUnitIdx >= 0)
+    {
+        gfx.fillRoundRect(UNDO_BTN_X, UNDO_BTN_Y, UNDO_BTN_W, UNDO_BTN_H, 4, TFT_DARKGREY);
+        gfx.drawRoundRect(UNDO_BTN_X, UNDO_BTN_Y, UNDO_BTN_W, UNDO_BTN_H, 4, TFT_WHITE);
+        gfx.setTextSize(1);
+        gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+        gfx.setCursor(UNDO_BTN_X + 8, UNDO_BTN_Y + 11);
+        gfx.print("UNDO");
     }
 }
 
