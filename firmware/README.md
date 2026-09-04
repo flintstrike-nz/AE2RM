@@ -283,10 +283,16 @@ misc pins are transcribed from vendor docs and not confirmed on-device.
   caches are content-independent across maps and are deliberately not
   reset. The win banner's tap-to-continue returns here -- and so does a
   dedicated **MENU** button, always available during a mission regardless
-  of game state. That button isn't optional polish: `m4`/`m6` place no
-  red units in their map data (see above), so those two missions can
-  never trigger the king-death win condition -- without an unconditional
-  way out, playing one would permanently strand you in STATE_PLAYING.
+  of game state.
+  Story maps unlock in order: only `m0` is open on a fresh install,
+  and beating story level *i* unlocks *i+1* (`unlockedStoryLevel`,
+  persisted in `Preferences` `"aeii"`/`"unlocked"`; a locked row is
+  dimmed and non-tappable, a beaten one gets a green tick). `m4`/`m6`
+  have no opposition in their `.aem` data (see above) and the
+  reinforcement script isn't ported, so `checkEndConditions()` treats
+  "the human is the only side that ever had units" as a win once you end
+  a turn -- otherwise progression would dead-end there. The **12
+  skirmish maps** (SKIRMISH tab) are never gated.
 - Mission briefing (`showMissionBriefing()` in `main.cpp`, new this
   milestone): right after a map loads -- all 8 story maps, not just
   `m0` -- a full-screen title-and-objective card shows before handing
@@ -394,9 +400,9 @@ those, see the skirmish section above). The original
 format, terrain layer, unit starting positions, enough movement/combat/
 capture rules for a single-player skirmish against a basic AI, real
 mission titles and `m0`'s intro cutscene, the 12 skirmish maps, and is
-playable to a conclusion on the 6 story maps that start with red units to
-fight (`m4` and `m6` don't -- see above -- so those two can't yet reach
-the win condition) and on any skirmish map.
+playable to a conclusion on all 8 story maps (`m4`/`m6` have no
+opposition so they resolve as a win on the first end-turn -- see the
+mission-menu section) and on any skirmish map.
 
 ## Build & flash
 
