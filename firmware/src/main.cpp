@@ -384,7 +384,7 @@ constexpr int SKIRMISH_START_GOLD = 2000;
 
 // True while the active game is a skirmish map (s<currentMapIndex>.aem);
 // false for a story map. Set by startGame(), carried in the save, and
-// read by RETRY and the win banner.
+// read by the RETRY button so it reloads the right map set.
 static bool skirmishMode = false;
 
 enum AppState
@@ -3098,9 +3098,9 @@ bool loadGame()
     b = SaveBlob{};
     size_t n = p.getBytes("save", &b, sizeof(b));
     p.end();
-    bool loadSkirmish = b.skirmish != 0;
+    bool loadSkirmish = b.skirmish == 1;
     int mapLimit = loadSkirmish ? SKIRMISH_MAP_COUNT : STORY_MAP_COUNT;
-    if (n != sizeof(b) || b.magic != SAVE_MAGIC ||
+    if (n != sizeof(b) || b.magic != SAVE_MAGIC || b.skirmish > 1 ||
         b.mapIndex < 0 || b.mapIndex >= mapLimit ||
         b.count < 0 || b.count > MAX_UNITS)
         return false;
