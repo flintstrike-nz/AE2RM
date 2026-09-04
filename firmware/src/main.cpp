@@ -946,6 +946,7 @@ void attackUnit(int attackerIdx, int victimIdx)
         UNIT_ATTACK_RANGE_MIN[victim.type] == 1)
     {
         delay(COUNTERATTACK_PAUSE_MS);
+        audioSfx(SFX_HIT);
         int counterHit = resolveHit(victimIdx, attackerIdx);
         playHitEffect(attackerIdx, counterHit);
     }
@@ -2845,7 +2846,8 @@ void handleTap(int screenX, int screenY)
                 pauseMenuOpen = false;
                 selectedUnit = infoUnit = -1;
                 appState = STATE_MENU;
-                showTitleScreen(); // splash + tap, same as boot
+                audioMusic(MUSIC_TITLE); // before the (blocking) splash, not after
+                showTitleScreen();       // splash + tap, same as boot
                 drawMenu();
                 return;
             }

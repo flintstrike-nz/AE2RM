@@ -5,6 +5,7 @@
 #include <Preferences.h>
 #include <driver/i2s.h> // Arduino-ESP32 2.x ships the legacy I2S driver
 #include <math.h>
+#include <atomic>
 
 #include "board_pins.h"
 
@@ -22,7 +23,7 @@ constexpr int NUM_TONE_VOICES = 3; // 0 melody, 1 bass, 2 SFX (preempts)
 constexpr int SFX_VOICE = 2;
 
 bool g_ready = false;
-bool g_muted = false;
+std::atomic<bool> g_muted{false}; // written by the game task, read by the synth task
 volatile MusicId g_music = MUSIC_OFF;
 
 // ---------------------------------------------------------------------------
@@ -66,12 +67,12 @@ bool es8311Init()
         uint8_t reg, val;
     } seq[] = {
         {0x01, 0x30}, {0x02, 0x00}, {0x03, 0x10}, {0x16, 0x24},
-        {0x04, 0x10}, {0x05, 0x00}, {0x0B, 0x00}, {0x0C, 0x00},
+        {0x04, 0x20}, {0x05, 0x00}, {0x0B, 0x00}, {0x0C, 0x00}, // 0x04: DAC OSR for 256*fs
         {0x10, 0x1F}, {0x11, 0x7F}, {0x00, 0x80}, // slave mode, power up
         {0x0D, 0x01}, {0x0E, 0x02}, {0x12, 0x00}, {0x13, 0x10},
         {0x09, 0x00}, {0x0A, 0x00},               // SDP: 16-bit I2S in/out
         {0x32, 0xBF},                             // DAC volume (~0 dB)
-        {0x37, 0x08}, {0x44, 0x08},
+        {0x37, 0x08}, {0x44, 0x58},               // 0x44: internal DAC reference path
         {0x06, 0x03}, {0x07, 0x00}, {0x08, 0xFF}, // MCLK divider set for 256*fs
         {0x01, 0x3F},                             // enable all clocks
     };
@@ -127,15 +128,19 @@ bool i2sInit()
 // ---------------------------------------------------------------------------
 struct Voice
 {
-    uint32_t phase = 0;   // 16.16 fixed
-    uint32_t step = 0;    // phase increment per sample
-    int32_t vol = 0;      // 0..256, current
-    int32_t targetVol = 0;
-    bool square = true;
+    uint32_t phase = 0;  // 16.16 fixed
+    uint32_t step = 0;   // phase increment per sample
+    int32_t env = 0;     // 8.8 fixed envelope level; amplitude = env >> 8
+    int32_t decay = 0;   // env units subtracted per sample
 };
 Voice g_voice[NUM_TONE_VOICES];
 uint32_t g_noiseLfsr = 0xACE1u;
 int32_t g_noiseVol = 0;
+
+// ~180 ms linear decay to silence -- a plucky chiptune envelope. At
+// 16 kHz that's ~2880 samples, so a note stays audible for most of a
+// music step and every SFX segment.
+constexpr int DECAY_SAMPLES = 2880;
 
 float noteHz(uint8_t note)
 {
@@ -148,13 +153,15 @@ void voiceNote(int v, uint8_t note, int vol)
 {
     if (note == 0)
     {
-        g_voice[v].targetVol = 0;
+        g_voice[v].env = 0;
         return;
     }
     float hz = noteHz(note);
     g_voice[v].step = (uint32_t)(hz * 65536.0f / SAMPLE_RATE);
-    g_voice[v].vol = vol;
-    g_voice[v].targetVol = 0; // decay to silence -- a plucky chiptune envelope
+    g_voice[v].env = vol << 8;
+    g_voice[v].decay = (vol << 8) / DECAY_SAMPLES;
+    if (g_voice[v].decay < 1)
+        g_voice[v].decay = 1;
 }
 
 // One music step: a note per melodic voice, held for durMs.
@@ -264,7 +271,7 @@ void renderBlock(int16_t *out, int n)
     }
     else
     {
-        g_voice[0].targetVol = g_voice[1].targetVol = 0;
+        g_voice[0].env = g_voice[1].env = 0;
     }
 
     if (g_sfxNotes && g_sfxIdx < g_sfxCount)
@@ -289,25 +296,21 @@ void renderBlock(int16_t *out, int n)
     portEXIT_CRITICAL(&g_mux);
 
     // --- render ---
-    const int master = g_muted ? 0 : 42; // headroom for 3 voices + noise
+    const int master = audioMuted() ? 0 : 42; // headroom for 3 voices + noise
     for (int i = 0; i < n; ++i)
     {
         int32_t acc = 0;
         for (int v = 0; v < NUM_TONE_VOICES; ++v)
         {
             Voice &vc = g_voice[v];
-            if (vc.vol > 0 || vc.targetVol > 0)
+            if (vc.env > 0)
             {
                 vc.phase += vc.step;
-                int32_t s = (vc.phase & 0x8000) ? 1 : -1; // 50% square
-                acc += s * vc.vol;
-                // ~30 ms linear decay toward targetVol
-                if (vc.vol > vc.targetVol)
-                {
-                    vc.vol -= 2;
-                    if (vc.vol < vc.targetVol)
-                        vc.vol = vc.targetVol;
-                }
+                int32_t amp = vc.env >> 8;
+                acc += ((vc.phase & 0x8000) ? amp : -amp); // 50% square
+                vc.env -= vc.decay;
+                if (vc.env < 0)
+                    vc.env = 0;
             }
         }
         if (g_noiseVol > 0)
@@ -356,15 +359,16 @@ bool audioInit()
     pinMode(PIN_AUDIO_PA_EN, OUTPUT);
     digitalWrite(PIN_AUDIO_PA_EN, LOW); // amp off until the codec is configured
 
-    bool codec = es8311Init();
-    bool i2s = i2sInit();
-    if (!i2s)
+    if (!es8311Init())
+    {
+        Serial.println("audio: disabled (ES8311 setup failed)");
+        return false; // leave the amp off -- contract: audioAvailable() == false
+    }
+    if (!i2sInit())
     {
         Serial.println("audio: disabled (I2S init failed)");
         return false;
     }
-    if (!codec)
-        Serial.println("audio: ES8311 setup incomplete -- output may be silent");
 
     digitalWrite(PIN_AUDIO_PA_EN, HIGH);
 
@@ -378,7 +382,7 @@ bool audioInit()
     }
 
     g_ready = true;
-    Serial.printf("audio: ready (muted=%d)\n", (int)g_muted);
+    Serial.printf("audio: ready (muted=%d)\n", (int)g_muted.load());
     return true;
 }
 
