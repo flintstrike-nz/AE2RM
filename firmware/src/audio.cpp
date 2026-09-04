@@ -24,7 +24,7 @@ constexpr int SFX_VOICE = 2;
 
 bool g_ready = false;
 std::atomic<bool> g_muted{false}; // written by the game task, read by the synth task
-volatile MusicId g_music = MUSIC_OFF;
+MusicId g_music = MUSIC_OFF; // only touched under g_mux
 
 // ---------------------------------------------------------------------------
 // ES8311 codec -- minimal DAC-only bring-up. Transcribed from Espressif's
@@ -142,22 +142,27 @@ int32_t g_noiseVol = 0;
 // music step and every SFX segment.
 constexpr int DECAY_SAMPLES = 2880;
 
-float noteHz(uint8_t note)
+// MIDI note -> 16.16 phase increment per sample, filled once at init so
+// voiceNote() (called from inside the sequencer's critical section) is a
+// plain lookup with no powf().
+uint32_t g_phaseStep[128];
+void buildPhaseTable()
 {
-    if (note == 0)
-        return 0.0f;
-    return 440.0f * powf(2.0f, (note - 69) / 12.0f);
+    for (int n = 0; n < 128; ++n)
+    {
+        float hz = 440.0f * powf(2.0f, (n - 69) / 12.0f);
+        g_phaseStep[n] = (uint32_t)(hz * 65536.0f / SAMPLE_RATE);
+    }
 }
 
 void voiceNote(int v, uint8_t note, int vol)
 {
-    if (note == 0)
+    if (note == 0 || note >= 128)
     {
         g_voice[v].env = 0;
         return;
     }
-    float hz = noteHz(note);
-    g_voice[v].step = (uint32_t)(hz * 65536.0f / SAMPLE_RATE);
+    g_voice[v].step = g_phaseStep[note];
     g_voice[v].env = vol << 8;
     g_voice[v].decay = (vol << 8) / DECAY_SAMPLES;
     if (g_voice[v].decay < 1)
@@ -356,6 +361,8 @@ bool audioInit()
         }
     }
 
+    buildPhaseTable();
+
     pinMode(PIN_AUDIO_PA_EN, OUTPUT);
     digitalWrite(PIN_AUDIO_PA_EN, AUDIO_PA_EN_OFF); // amp muted until everything's up
 
@@ -402,12 +409,13 @@ void audioMusic(MusicId id)
 {
     if (id < 0 || id >= MUSIC_COUNT)
         return;
-    if (g_music == id)
-        return;
     portENTER_CRITICAL(&g_mux);
-    g_music = id;
-    g_trackStep = 0;
-    g_stepElapsedMs = 0;
+    if (g_music != id)
+    {
+        g_music = id;
+        g_trackStep = 0;
+        g_stepElapsedMs = 0;
+    }
     portEXIT_CRITICAL(&g_mux);
 }
 

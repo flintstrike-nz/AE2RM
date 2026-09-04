@@ -1,18 +1,20 @@
 # AE2RM ESP32 port (firmware)
 
 Porting AE2RM (a ~19,500-line J2ME/MIDP game) to an ESP32 is a full rewrite,
-not an automatic conversion — there's no JVM here. This is **milestone 17**:
+not an automatic conversion — there's no JVM here. This is **milestone 23**:
 terrain, units, movement, combat, capture, and the mission menu
 (milestones 1-6), an AI opponent (milestones 7-8, 11, 13) — you're always
-blue, the computer is always red, so this is playable single-player — a
-tap-to-inspect unit stat panel, living-unit-count HUD readout, and RETRY
-button on the win/loss banner (milestones 9, 12, 14), a full-screen mission
-briefing before every mission (milestone 15), a title screen and a combat
-hit-flash effect using the original's own art (milestone 16), `m0`'s
-scripted sprite effects (`CreateSpriteAtUnit`, milestone 17), and `m0`'s
-intro cutscene, the first piece of the original's scripted mission events
-to be ported (milestone 10; see "Mission-script interpreter" below for
-exactly how much of the format that covers).
+blue, the computer is always red on the story maps, so this is playable
+single-player — a tap-to-inspect unit stat panel, living-unit-count HUD
+readout, and RETRY button on the win/loss banner (milestones 9, 12, 14), a
+full-screen mission briefing before every mission (milestone 15), a title
+screen and a combat hit-flash effect using the original's own art
+(milestone 16), `m0`'s scripted sprite effects and intro cutscene
+(milestones 10, 17), a card-less build with a HUD/pause menu, win-loss
+detection, an economy and shop, turn-start healing and combat matchup
+bonuses (milestones 18-21), an N-side turn model driving the 12 skirmish
+maps (milestone 24), walk animation / rising damage numbers / move undo
+(milestone 25), and a chiptune synth over the ES8311 codec (milestone 23).
 
 ## Target hardware
 
@@ -20,13 +22,13 @@ ESP32-S3 2.8" board, ES3C28P ("Xiaozhi" variant):
 - ILI9341, 240x320, 4-wire SPI — **display + touch pins user-confirmed
   working on real hardware**
 - FT6336 capacitive touch, I2C
-- ES8311 audio codec + I2S (not used by the firmware yet)
+- ES8311 audio codec + I2S (driven by the chiptune synth — see below)
 - MicroSD via SD/MMC 4-bit (not SPI — its own dedicated pins)
 - 16MB flash, 512KB SRAM + PSRAM
 
 See `include/board_pins.h` for the full pinout. Display/touch are
-verified; SD, audio, and misc pins are transcribed from vendor docs and
-not yet confirmed on-device.
+verified; the SD, audio (including the speaker-amp enable polarity), and
+misc pins are transcribed from vendor docs and not confirmed on-device.
 
 ## What's implemented
 
