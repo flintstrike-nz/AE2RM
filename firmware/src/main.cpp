@@ -3035,7 +3035,17 @@ bool hasSavedGame()
     Preferences p;
     if (!p.begin("aeii", true))
         return false;
-    bool ok = p.getBytesLength("save") == sizeof(SaveBlob);
+    // Size alone isn't enough: an older-format blob can be byte-identical
+    // in length (a new format field lands in what used to be struct
+    // padding), so also check the magic -- otherwise LOAD looks available
+    // and then fails in loadGame(). Preferences can't do a partial read,
+    // so pull the whole blob (rare call -- menu / pause-menu render).
+    bool ok = false;
+    if (p.getBytesLength("save") == sizeof(SaveBlob))
+    {
+        static SaveBlob b;
+        ok = p.getBytes("save", &b, sizeof(b)) == sizeof(b) && b.magic == SAVE_MAGIC;
+    }
     p.end();
     return ok;
 }
