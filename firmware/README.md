@@ -49,9 +49,9 @@ not yet confirmed on-device.
   all converted and playable): `MainDisplayable.java`'s `loadMap()` always
   hardcodes the same 2-side turn queue for these (raw color 0 = blue, 1 =
   red), so using each unit record's raw color slot directly is correct
-  here — it would NOT be for skirmish maps (`s0`-`s11`, not
-  converted/loaded), which build a real building-derived queue for up to
-  4 sides; that logic isn't ported. `m4` and `m6` place no color-1 (red)
+  here. Skirmish maps (`s0`-`s11`) instead build the queue from castle
+  ownership and remap raw colors to queue positions -- see the skirmish
+  section below. `m4` and `m6` place no color-1 (red)
   units at all in their starting layout. It's tempting to blame this on
   unported mission scripting, but that doesn't hold up: the source
   archive this port builds from contains a `.script` file (a real
@@ -212,10 +212,22 @@ not yet confirmed on-device.
   returns to the mission menu (see below) instead.
 - Turn model: a queue of up to four sides (`turnQueue` / `turnQueueLen`).
   Story maps `m0`-`m7` always run exactly two (`{0, 1}` -- blue human,
-  red AI); the queue is groundwork for skirmish maps, which will derive a
-  longer order from castle ownership. `endTurn()` walks the queue,
-  resolving each AI side's whole turn before control returns to the
-  human; eliminated sides are skipped.
+  red AI). `endTurn()` walks the queue, resolving each AI side's whole
+  turn before control returns to the human; eliminated sides are skipped.
+- Skirmish maps (`s0`-`s11`, all converted): pick one from the SKIRMISH
+  tab of the mission menu. `buildSkirmishTurnQueue()` scans the map in
+  column-major order and adds each castle-holding fraction to the turn
+  queue in the order its castle is found; that queue position becomes the
+  side's colour, and every building/unit is remapped from its raw
+  fraction to the matching position (buildings of a fraction with no
+  castle drop to neutral, its units are removed). **Simplifications vs.
+  the original**, which has a full pre-match setup screen: colour 0 --
+  the first castle in the scan -- is always the human, the rest are AI;
+  there's no team grouping, no per-map unit-type restriction, and every
+  side starts with a fixed 2000 gold (the original offers 500..200000).
+  Win/loss is the same last-side-standing rule as the story maps. A
+  skirmish game saves/loads like a story one (save format 6 carries the
+  skirmish flag).
 - Unit stat panel: tapping any living unit that *isn't* selectable this
   turn (an enemy, or a friendly unit that's already moved) shows a small
   bottom-left panel with its type, current HP, attack/defence, attack
@@ -347,17 +359,17 @@ red units, see above), the original's actual AI (this milestone's is a
 simple heuristic -- see above), a per-mission `allowedUnits` cap on which
 unit types the shop offers, the combat property bonuses noted above,
 MIDI music (needs its own synth — see
-the "Music" question this was scoped against), and skirmish maps
-(`s0`-`s11`: the turn model now handles up to four sides, but the map
-conversion and the castle-derived queue that feeds it aren't done -- see
-the team-color note above). The original `MainDisplayable.java` is
+the "Music" question this was scoped against), and the skirmish pre-match
+setup screen (choose your fraction, teams, start gold, unit cap -- this
+port fixes all of those, see the skirmish section above). The original
+`MainDisplayable.java` is
 ~11,000 lines covering all of that; this milestone reads its map-loading
 format, terrain layer, unit starting positions, enough movement/combat/
 capture rules for a single-player skirmish against a basic AI, real
-mission titles and `m0`'s intro cutscene, and is playable to a
-conclusion on the 6 story maps that start with red units to fight (`m4`
-and `m6` don't -- see above -- so those two can't yet reach the win
-condition).
+mission titles and `m0`'s intro cutscene, the 12 skirmish maps, and is
+playable to a conclusion on the 6 story maps that start with red units to
+fight (`m4` and `m6` don't -- see above -- so those two can't yet reach
+the win condition) and on any skirmish map.
 
 ## Build & flash
 

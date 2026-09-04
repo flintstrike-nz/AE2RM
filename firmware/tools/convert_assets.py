@@ -2,9 +2,11 @@
 """Convert AE2RM J2ME assets into the raw formats the ESP32 firmware reads
 from the SD card: the tiles0 tileset, unit icons, all 8 story maps
 (m0-m7 -- the "m*.aem" set loadMap() always builds the same 2-side team
-queue for, see main.cpp's UnitPlacement comment; skirmish maps s0-s11
-aren't converted), the localized string table, m0's mission script, the
-title screen, and the combat hit-flash effect.
+queue for, see main.cpp's UnitPlacement comment), the 12 skirmish maps
+(s0-s11 -- same .aem layout; the firmware derives their turn queue from
+castle ownership at load, see buildSkirmishTurnQueue()), the localized
+string table, m0's mission script, the title screen, and the combat
+hit-flash effect.
 
 Usage:
     pip install Pillow
@@ -34,6 +36,7 @@ Output layout on the SD card:
                                 table and a list of unit placement records
                                 the firmware also parses (see main.cpp's
                                 loadMap()).
+    /maps/sN.aem              -- skirmish maps, copied as-is for N in 0..11.
     /strings.dat               -- copied as-is from src/java/res/lang.dat
                                 (int32 BE count, then that many uint16
                                 BE-length-prefixed UTF-8 strings -- the
@@ -218,6 +221,16 @@ def main():
     STORY_MAP_COUNT = 8  # m0.aem .. m7.aem
     for i in range(STORY_MAP_COUNT):
         name = f"m{i}.aem"
+        shutil.copyfile(os.path.join(RES_DIR, name), os.path.join(maps_out, name))
+        print(f"copied {name}")
+
+    # Skirmish maps s0.aem .. s11.aem -- same .aem binary layout as the
+    # story maps, but the firmware derives a turn queue from castle
+    # ownership at load rather than assuming 2 sides (see main.cpp's
+    # buildSkirmishTurnQueue()). Their names are locale strings 101..112.
+    SKIRMISH_MAP_COUNT = 12
+    for i in range(SKIRMISH_MAP_COUNT):
+        name = f"s{i}.aem"
         shutil.copyfile(os.path.join(RES_DIR, name), os.path.join(maps_out, name))
         print(f"copied {name}")
 
