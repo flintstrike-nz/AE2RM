@@ -185,18 +185,30 @@ not yet confirmed on-device.
   (`UNIT_PROPERTIES` in `main.cpp`) -- soldier and king can capture
   villages, but **only the king can capture a castle**, matching the
   source data (no other unit has that property bit set).
-- Win condition: a side loses when its king dies in combat, **or** when it
-  has no units left at all -- `checkEndConditions()`, run after every
-  combat exchange and every turn, so clearing the last enemy (king or
-  not) ends the mission instead of leaving you stuck on a won board. A
-  side that started with zero units (`m4`/`m6` place no red units) is
-  exempt -- its emptiness isn't a defeat. This is a simplification of the
-  original, which ties defeat more to castle capture/`fractionKings`
-  bookkeeping this milestone doesn't track. The
-  screen shows a "BLUE/RED WINS" banner with a **RETRY** button that
-  reloads the same mission (`currentMapIndex`, set each time
-  `startGame()` runs) without a trip through the menu; tapping anywhere
-  else on the banner returns to the mission menu (see below) instead.
+- Win condition: a side is out when its king dies in combat (which routs
+  its whole army) **or** when it simply has no units left -- checked by
+  `checkEndConditions()` after every combat exchange and every turn, so
+  clearing the last enemy (king or not) ends the mission instead of
+  leaving you stuck on a won board. A defeat is latched (`eliminated[]`)
+  so a later recruit can't undo it. A side that started with zero units
+  (`m4`/`m6` place no red units) is exempt -- its emptiness isn't a
+  defeat. The mission ends once at most one side that started with units
+  still has any. This is a simplification of the original, which ties
+  defeat more to castle capture/`fractionKings` bookkeeping this port
+  doesn't track. The banner names the surviving side in its HUD colour
+  ("BLUE WINS" / "RED WINS" on story maps, "GREEN WINS" etc. once a
+  skirmish queue has more than two sides), shows **DEFEAT** if the human
+  is wiped out while two or more other sides fight on, and **DRAW** if
+  the last sides fall in the same exchange. A **RETRY** button reloads
+  the same mission (`currentMapIndex`, set each time `startGame()` runs)
+  without a trip through the menu; tapping anywhere else on the banner
+  returns to the mission menu (see below) instead.
+- Turn model: a queue of up to four sides (`turnQueue` / `turnQueueLen`).
+  Story maps `m0`-`m7` always run exactly two (`{0, 1}` -- blue human,
+  red AI); the queue is groundwork for skirmish maps, which will derive a
+  longer order from castle ownership. `endTurn()` walks the queue,
+  resolving each AI side's whole turn before control returns to the
+  human; eliminated sides are skipped.
 - Unit stat panel: tapping any living unit that *isn't* selectable this
   turn (an enemy, or a friendly unit that's already moved) shows a small
   bottom-left panel with its type, current HP, attack/defence, attack
@@ -206,12 +218,12 @@ not yet confirmed on-device.
   as before -- the two interactions don't conflict since a unit is never
   both at once. No portrait, no per-unit ability text, no equivalent to
   the original's fuller unit-info screen.
-- Living-unit counts: the top HUD bar, next to the BLUE/RED TURN
-  indicator, shows how many of each side's units are still alive, as
-  `blueCount:redCount` in each side's color, recomputed every redraw.
-  Only colors 0/1 are counted -- consistent with the rest of this port,
-  which only ever loads story maps that place those two -- so this
-  isn't a general 4-color skirmish scoreboard.
+- Living-unit counts: the footer bar shows how many of each side's units
+  are still alive -- one figure per side that started with units, in that
+  side's colour (`N vs N`, or `N vs N vs N` on a multi-side map),
+  recomputed every redraw. The header's turn indicator reads "YOUR TURN"
+  / "ENEMY TURN" on a two-side map and names the side ("RED TURN") once
+  the queue is longer.
 - Title screen (`showTitleScreen()` in `main.cpp`, new this milestone):
   shown once at boot, before the mission menu -- the original's own
   `splash.png` (exactly 240x320, a pixel-perfect match for this
@@ -310,8 +322,8 @@ not yet confirmed on-device.
   (unoccupied, passable, next to one of your castles) to deploy it; the
   gold is deducted and the unit is usable that turn. The AI recruits the
   same way -- once its units have moved, it buys the priciest unit it can
-  afford (up to a 10-unit soft cap) and drops it by its castle. Per-side
-  gold is carried in the save (format 4).
+  afford (up to a 10-unit soft cap) and drops it by its castle. An
+  eliminated side can't recruit.
 - Turn-start healing (`applyTurnHealing()`): a unit that begins its side's
   turn standing on a **neutral town** (terrain type 7) or a **building
   that side owns** heals up to **20 HP** (capped at 100), matching the
@@ -329,8 +341,9 @@ simple heuristic -- see above), a per-mission `allowedUnits` cap on which
 unit types the shop offers, the combat property bonuses noted above,
 MIDI music (needs its own synth — see
 the "Music" question this was scoped against), and skirmish maps
-(`s0`-`s11`, which would also need a 4-side, non-hardcoded turn queue --
-see the team-color note above). The original `MainDisplayable.java` is
+(`s0`-`s11`: the turn model now handles up to four sides, but the map
+conversion and the castle-derived queue that feeds it aren't done -- see
+the team-color note above). The original `MainDisplayable.java` is
 ~11,000 lines covering all of that; this milestone reads its map-loading
 format, terrain layer, unit starting positions, enough movement/combat/
 capture rules for a single-player skirmish against a basic AI, real

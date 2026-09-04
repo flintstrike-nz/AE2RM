@@ -41,10 +41,13 @@
 // your castles to deploy it. The AI recruits too. A unit that starts its
 // side's turn on a neutral town or a building that side owns heals up to
 // 20 HP. MENU opens an in-mission pause menu -- return / save / load (an
-// NVS snapshot) / exit to title. A mission ends when a side's king
-// dies or that side is wiped out entirely (checkEndConditions()) -- a
+// NVS snapshot) / exit to title. The turn model runs a queue of up to four
+// sides (story maps m0-m7 are always 2: color 0 blue = human, color 1 red
+// = AI); endTurn() resolves every AI side in the queue before control
+// returns to the human. A mission ends when only one side still has units
+// -- a side's king dying routs its whole army (checkEndConditions()), a
 // simplification of the original's castle-capture-tied defeat, see
-// README. The win banner has a RETRY button that reloads the same mission
+// README. With every side wiped out at once the banner reads DRAW. The win banner has a RETRY button that reloads the same mission
 // directly; tapping anywhere else on the banner returns to the mission
 // menu. Drag pans the camera during a mission. See firmware/README.md for
 // what's implemented and what's next.
@@ -225,6 +228,11 @@ static const char *const UNIT_TYPE_NAMES[UNIT_TYPE_COUNT] = {
     "GOLEM", "CATAPULT", "WYVERN", "KING", "SKELETON", "CRYSTAL",
 };
 
+// Per-side identity (UnitPlacement::color 0..3). The HUD colour for
+// "black" is a light grey -- true black is invisible on the dark bands.
+static const char *const PLAYER_NAME[4] = {"BLUE", "RED", "GREEN", "BLACK"};
+static const uint16_t PLAYER_HUD_COLOR[4] = {TFT_CYAN, TFT_RED, TFT_GREEN, 0xBDF7};
+
 // Bit flags from each unit's "HasProperty N" lines (UNIT_PROPERTIES[i] =
 // OR of 1<<N for each line). Bits read here:
 //   bit 3 (0x08) "can capture a village" -- soldier and king
@@ -265,15 +273,35 @@ inline uint8_t setBuildingFraction(uint8_t tile, int fraction)
     return FRACTION_BUILDINGS + fraction * 2 + (tile - FRACTION_BUILDINGS) % 2;
 }
 
+// Up to 4 sides (`UnitPlacement::color` 0..3): story maps use exactly two
+// (0 blue = human, 1 red = AI), but the turn model is general so skirmish
+// maps can later add green/black. The human is always color 0; every
+// other color in the turn queue is AI.
+constexpr int MAX_PLAYERS = 4;
+constexpr int HUMAN_COLOR = 0;
+
+// The order sides take turns in. For story maps it's just {0, 1}; a
+// skirmish map derives it from which fractions own a castle at start.
+// currentTurn holds a color, not an index -- switchTurn() walks the queue.
+static uint8_t turnQueue[MAX_PLAYERS] = {0, 1};
+static int turnQueueLen = 2;
+
 static bool gameOver = false;
-static int winnerColor = -1; // 0 or 1, matches UnitPlacement::color
+static int winnerColor = -1; // colour of the last side standing, or -1 for a draw
 
 // Living-unit count each side had once the mission was fully set up
 // (after any m0 intro-script removals). A side is defeated when it drops
 // to zero -- but only if it started with some: m4/m6 place no red units
 // at all (see README), and a side that was never in the fight isn't a
 // loser. Set at the end of startGame(); carried in a save.
-static int startingUnits[2] = {0, 0};
+static int startingUnits[MAX_PLAYERS] = {0, 0, 0, 0};
+
+// Latched true once a side that started with units has none left (wiped
+// out, or routed by its king's death). A defeated side stays defeated:
+// switchTurn() skips its slot in the queue and the shop refuses it, so a
+// later recruit can't bring it back into a 3-4 way fight. Cleared in
+// startGame(); carried in a save.
+static bool eliminated[MAX_PLAYERS] = {false, false, false, false};
 
 // The mission startGame() most recently loaded (m<currentMapIndex>.aem),
 // or -1 before any mission has loaded. Only used by the win/loss banner's
@@ -309,17 +337,16 @@ static char *scriptStrings = nullptr;
 static uint32_t *scriptStringOffsets = nullptr;
 static int scriptStringCount = 0;
 
-// 0 or 1, matching UnitPlacement::color directly (see the comment on that
-// struct). Color 1 is always AI-controlled (see AI_COLOR below) -- there
-// is no two-human hotseat mode anymore, endTurn() always resolves color
-// 1's turn through the AI synchronously before returning control.
+// Colour of the side whose turn it is (0..3). endTurn() resolves every
+// non-human side in the queue through the AI synchronously before handing
+// control back, so the player only ever sees currentTurn == HUMAN_COLOR.
 static int currentTurn = 0;
 
-// Treasury per side (0 = blue/human, 1 = red/AI). Story maps start both at
-// 0 in the original; income accrues at each side's turn start from the
-// villages/castles it owns (see grantTurnIncome()). The header shows
-// gold[0]; a save carries both.
-static int32_t gold[2] = {0, 0};
+// Treasury per side. Story maps start every side at 0 in the original;
+// income accrues at each side's turn start from the villages/castles it
+// owns (see computeIncome()). The header shows the human's gold; a save
+// carries all four.
+static int32_t gold[MAX_PLAYERS] = {0, 0, 0, 0};
 
 // The in-mission pause menu (hamburger) and the shop are both modal over
 // the game: while either is open drawViewport() paints it on top and
@@ -616,32 +643,62 @@ inline void centerViewOnTile(int tx, int ty)
     clampView();
 }
 
-// Ends the mission the moment one side has no units left. King death is a
-// faster, separate instant-win kept in resolveHit() (killing the king
-// ends it even with other enemy units still standing -- the documented
-// simplification of the original's castle-capture-tied defeat). This
-// catches every other finish -- clearing the last non-king enemy, or
-// losing your own last unit -- which nothing checked before, so the
-// player was left stuck on a won board with no banner and no way to end
-// the mission. A no-op once gameOver is set; call after any combat
-// exchange and after each turn resolves.
+// Runs the last-side-standing check. A side is out once it has no living
+// units -- either wiped out in combat, or routed the instant its king
+// dies (resolveHit() clears every unit of that colour). That defeat is
+// latched into eliminated[] here so it can't be undone by a later
+// recruit. The mission ends once at most one side that started with
+// units still has any; winnerColor is that side (or -1 if the last two
+// fell in the same exchange -- a draw). A simplification of the
+// original's castle-capture-tied defeat, see README. A no-op once
+// gameOver is set; call after any combat exchange and after each turn
+// resolves.
 void checkEndConditions()
 {
     if (gameOver)
         return;
-    int alive[2] = {0, 0};
+
+    int alive[MAX_PLAYERS] = {0};
     for (int i = 0; i < unitCount; ++i)
-        if (units[i].alive && units[i].color < 2)
+        if (units[i].alive && units[i].color < MAX_PLAYERS)
             alive[units[i].color]++;
 
-    bool blueOut = startingUnits[0] > 0 && alive[0] == 0;
-    bool redOut = startingUnits[1] > 0 && alive[1] == 0;
-    if (!blueOut && !redOut)
+    int sidesStarted = 0, sidesLeft = 0, lastLeft = -1;
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+    {
+        if (startingUnits[c] <= 0)
+            continue; // never in the fight -- e.g. m4/m6 have no red units
+        ++sidesStarted;
+        if (alive[c] > 0)
+        {
+            ++sidesLeft;
+            lastLeft = c;
+        }
+        else
+            eliminated[c] = true; // latched -- no coming back via recruitment
+    }
+
+    // The human losing its last unit ends the mission immediately -- a
+    // defeat. Whatever's left is an AI-vs-AI fight the player can't
+    // influence or even watch (endTurn()'s hand-off loop has no human
+    // slot to return control to), so don't run it out.
+    if (startingUnits[HUMAN_COLOR] > 0 && alive[HUMAN_COLOR] == 0)
+    {
+        gameOver = true;
+        winnerColor = (sidesLeft == 1) ? lastLeft : -1;
+        Serial.println("game over: human side eliminated -- defeat");
+        return;
+    }
+
+    // Nothing to decide on a one-side sandbox map; otherwise the mission
+    // ends once at most one side still has units.
+    if (sidesStarted < 2 || sidesLeft > 1)
         return;
 
     gameOver = true;
-    winnerColor = blueOut ? 1 : 0; // both-out (shouldn't happen) -> the AI side
-    Serial.printf("game over: color %d wins (opponent eliminated)\n", winnerColor);
+    winnerColor = lastLeft; // -1 if every side was wiped out at once
+    Serial.printf("game over: color %d wins (%d of %d sides eliminated)\n",
+                  winnerColor, sidesStarted - sidesLeft, sidesStarted);
 }
 
 constexpr uint8_t TEMPLE_TILE = 34; // the one non-fraction "town" graphic that grants combat bonuses
@@ -713,16 +770,18 @@ int resolveHit(int attackerIdx, int victimIdx)
     if (victim.health == 0)
     {
         victim.alive = false;
-        // Win condition: a side loses when its king dies. This is a
-        // simplification -- the original ties defeat to castle capture as
-        // much as king death, tracked through fractionKings/turn-queue
-        // bookkeeping this milestone doesn't port -- but king death is
-        // the clearest single condition to key off without that machinery.
+        // A side whose king dies is routed -- the rest of its army leaves
+        // the field. checkEndConditions() (run right after every combat
+        // exchange) then declares the winner once one side is left. This
+        // is a simplification of the original's castle-capture-tied
+        // defeat, but generalises cleanly to 3-4 sides.
         if (victim.type == UNIT_TYPE_KING)
         {
-            gameOver = true;
-            winnerColor = attacker.color;
-            Serial.printf("game over: color %d wins (king killed)\n", winnerColor);
+            int routed = victim.color;
+            for (int i = 0; i < unitCount; ++i)
+                if (units[i].color == routed)
+                    units[i].alive = false;
+            Serial.printf("king of color %d killed -- side routed\n", routed);
         }
     }
     return hit;
@@ -1633,6 +1692,19 @@ void runIntroScript()
         drawViewport();
 }
 
+// (Re)counts each side's living units into startingUnits[] -- the roster
+// checkEndConditions() measures defeat against, and the source of the
+// footer's per-side tally. Called once before the first mission render
+// and again after m0's intro script (which repositions/removes units).
+void recountStartingUnits()
+{
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+        startingUnits[c] = 0;
+    for (int i = 0; i < unitCount; ++i)
+        if (units[i].alive && units[i].color < MAX_PLAYERS)
+            startingUnits[units[i].color]++;
+}
+
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to
 // STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
 // across maps and are deliberately NOT reset here. Returns false (and
@@ -1669,7 +1741,7 @@ bool startGame(int mapIndex, bool interactive = true)
     }
 
     currentMapIndex = mapIndex;
-    currentTurn = 0;
+    currentTurn = HUMAN_COLOR;
     selectedUnit = -1;
     infoUnit = -1;
     gameOver = false;
@@ -1677,7 +1749,18 @@ bool startGame(int mapIndex, bool interactive = true)
     pauseMenuOpen = false;
     shopOpen = false;
     shopBuyType = -1;
-    gold[0] = gold[1] = 0; // story maps start both sides at 0 in the original
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+    {
+        gold[c] = 0; // story maps start every side at 0 in the original
+        eliminated[c] = false;
+    }
+
+    // Story maps m0-m7 are always a 2-side blue-vs-red fight (see the
+    // team-colour note in the README). Skirmish maps will derive a
+    // longer queue from castle ownership here.
+    turnQueue[0] = 0;
+    turnQueue[1] = 1;
+    turnQueueLen = 2;
 
     // Start the camera on the human player's king (color 0), like the
     // original does -- several maps place your side well down/right of the
@@ -1699,19 +1782,18 @@ bool startGame(int mapIndex, bool interactive = true)
     if (interactive)
         showMissionBriefing(mapIndex);
 
+    recountStartingUnits(); // so the first render's footer tally isn't blank
+
     appState = STATE_PLAYING;
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
     if (mapIndex == 0 && interactive)
+    {
         runIntroScript(); // only m0 has a mission-script file -- see its comment
-
-    // Record the roster the mission actually starts from -- after any
-    // intro-script unit removals -- for checkEndConditions().
-    startingUnits[0] = startingUnits[1] = 0;
-    for (int i = 0; i < unitCount; ++i)
-        if (units[i].alive && units[i].color < 2)
-            startingUnits[units[i].color]++;
+        recountStartingUnits(); // the intro repositions/removes units
+        drawViewport();
+    }
     return true;
 }
 
@@ -1730,11 +1812,10 @@ void handleMenuTap(int screenX, int screenY)
 
 void tryCaptureBuilding(const UnitPlacement &u); // defined below; used by the AI first
 
-// Color 1 (red) is always the computer side; color 0 (blue) is always the
-// human. There's no way to flip this, and no way to disable it either --
-// endTurn() below always auto-resolves color 1's turn through the AI, so
-// the two-human hotseat mode earlier milestones had no longer applies.
-constexpr int AI_COLOR = 1;
+// Color 0 (blue) is always the human; every other color in the turn queue
+// is AI. endTurn() below auto-resolves each AI side's turn synchronously,
+// so control only ever returns to the player on color HUMAN_COLOR.
+inline bool isAiColor(int color) { return color != HUMAN_COLOR; }
 
 // True if attackerType/attackerHealth attacking victimIdx is guaranteed to
 // kill it no matter how resolveHit()'s random() roll comes out -- using
@@ -2023,7 +2104,7 @@ void aiActUnit(int idx)
 // on why the AI here isn't a port of the original's.
 void aiTryRecruit(int color)
 {
-    if (gameOver || ownedCastleCount(color) == 0 || unitCount >= MAX_UNITS)
+    if (gameOver || eliminated[color] || ownedCastleCount(color) == 0 || unitCount >= MAX_UNITS)
         return;
     int myUnits = 0;
     for (int i = 0; i < unitCount; ++i)
@@ -2056,7 +2137,7 @@ void aiTryRecruit(int color)
             nu.hasMoved = true; // it moves next turn
             nu.alive = true;
             nu.health = 100;
-            if (color < 2)
+            if (color < MAX_PLAYERS)
                 startingUnits[color]++;
             Serial.printf("AI (color %d) recruited type %d at (%d,%d), gold now %ld\n",
                           color, buyType, x, y, (long)gold[color]);
@@ -2117,14 +2198,32 @@ void applyTurnHealing(int color)
     }
 }
 
+// Advance currentTurn to the next colour in the turn queue, then grant
+// that side its turn-start income and healing and un-move its units.
 void switchTurn()
 {
-    currentTurn = 1 - currentTurn;
-    for (int i = 0; i < unitCount; ++i)
+    int pos = 0;
+    for (int i = 0; i < turnQueueLen; ++i)
+        if (turnQueue[i] == currentTurn)
+        {
+            pos = i;
+            break;
+        }
+    // Advance to the next side still in the fight -- skip any that have
+    // been eliminated so a defeated colour never gets another turn.
+    for (int step = 1; step <= turnQueueLen; ++step)
     {
+        int cand = turnQueue[(pos + step) % turnQueueLen];
+        if (!eliminated[cand])
+        {
+            currentTurn = cand;
+            break;
+        }
+    }
+
+    for (int i = 0; i < unitCount; ++i)
         if (units[i].color == currentTurn)
             units[i].hasMoved = false;
-    }
     selectedUnit = -1;
 
     int income = computeIncome(currentTurn);
@@ -2145,19 +2244,30 @@ void endTurn()
         return;
     }
 
-    switchTurn();
-    Serial.printf("turn: %s\n", currentTurn == 0 ? "blue" : "red");
-
-    if (currentTurn == AI_COLOR && !gameOver)
+    // Hand off around the queue, running each AI side's whole turn as we
+    // pass it, until control is back on the human (or the game ends). At
+    // most one full lap -- guards a degenerate queue with no human slot.
+    for (int steps = 0; steps < turnQueueLen; ++steps)
     {
+        switchTurn();
+        Serial.printf("turn: color %d\n", currentTurn);
+        if (gameOver)
+            break;
+        if (!isAiColor(currentTurn))
+            break;
         runAITurn();
         checkEndConditions();
-        if (!gameOver)
-        {
-            switchTurn();
-            Serial.println("turn: blue (AI done)");
-        }
+        if (gameOver)
+            break;
     }
+
+    // The human is always an un-eliminated member of the queue when
+    // endTurn() runs (the shop/END-TURN paths and checkEndConditions()
+    // guarantee it), so the lap above lands back on HUMAN_COLOR. Belt and
+    // braces: never leave the player holding an AI side if it somehow
+    // didn't.
+    if (!gameOver && isAiColor(currentTurn))
+        currentTurn = HUMAN_COLOR;
 
     drawViewport();
 }
@@ -2300,7 +2410,7 @@ void handleTap(int screenX, int screenY)
                 int ry = SHOP_Y + SHOP_HEAD_H + i * SHOP_ROW_H;
                 if (!inRect(SHOP_X + 4, ry, SHOP_W - 8, SHOP_ROW_H))
                     continue;
-                if (gold[0] >= UNIT_COST[i] && unitCount < MAX_UNITS)
+                if (gold[HUMAN_COLOR] >= UNIT_COST[i] && unitCount < MAX_UNITS)
                     shopBuyType = i;
                 drawViewport();
                 return;
@@ -2317,9 +2427,9 @@ void handleTap(int screenX, int screenY)
             int mx = (screenX + viewX) / TILE_SIZE;
             int my = (screenY - MAP_VIEW_Y + viewY) / TILE_SIZE;
             if (isShopDeployTile(mx, my, 0) && unitCount < MAX_UNITS &&
-                gold[0] >= UNIT_COST[shopBuyType])
+                gold[HUMAN_COLOR] >= UNIT_COST[shopBuyType])
             {
-                gold[0] -= UNIT_COST[shopBuyType];
+                gold[HUMAN_COLOR] -= UNIT_COST[shopBuyType];
                 UnitPlacement &nu = units[unitCount++];
                 nu.type = (uint8_t)shopBuyType;
                 nu.color = 0;
@@ -2329,7 +2439,7 @@ void handleTap(int screenX, int screenY)
                 nu.alive = true;
                 nu.health = 100;
                 Serial.printf("recruited type %d at (%d,%d) for %d, gold now %ld\n",
-                              shopBuyType, mx, my, UNIT_COST[shopBuyType], (long)gold[0]);
+                              shopBuyType, mx, my, UNIT_COST[shopBuyType], (long)gold[HUMAN_COLOR]);
                 startingUnits[0]++; // it's now part of blue's roster
                 shopOpen = false;
                 shopBuyType = -1;
@@ -2411,7 +2521,7 @@ void handleTap(int screenX, int screenY)
     {
         selectedUnit = infoUnit = -1;
         // Recruiting needs your turn and a castle to deploy next to.
-        if (currentTurn == 0 && !gameOver && ownedCastleCount(0) > 0)
+        if (currentTurn == HUMAN_COLOR && !gameOver && !eliminated[HUMAN_COLOR] && ownedCastleCount(HUMAN_COLOR) > 0)
         {
             shopOpen = true;
             shopBuyType = -1;
@@ -2513,7 +2623,9 @@ void handleTap(int screenX, int screenY)
     }
 
     int idx = unitIndexAt(mx, my);
-    if (idx >= 0 && units[idx].color == currentTurn && !units[idx].hasMoved)
+    // Only ever selectable as a movable unit if it's the human's and it's
+    // the human's turn -- taps never drive an AI side.
+    if (idx >= 0 && units[idx].color == HUMAN_COLOR && currentTurn == HUMAN_COLOR && !units[idx].hasMoved)
     {
         infoUnit = -1;
         selectedUnit = idx;
@@ -2577,12 +2689,18 @@ void drawHud()
     gfx.fillRect(0, 0, DISPLAY_WIDTH, HEADER_H, BAND_BG);
     gfx.drawFastHLine(0, HEADER_H - 1, DISPLAY_WIDTH, BAND_EDGE);
     gfx.setTextSize(1);
-    gfx.setTextColor(currentTurn == 0 ? TFT_CYAN : TFT_RED, BAND_BG);
+    int tc = currentTurn >= 0 && currentTurn < 4 ? currentTurn : 0;
+    gfx.setTextColor(PLAYER_HUD_COLOR[tc], BAND_BG);
     gfx.setCursor(4, 4);
-    gfx.print(currentTurn == 0 ? "YOUR TURN" : "ENEMY TURN");
+    if (currentTurn == HUMAN_COLOR)
+        gfx.print("YOUR TURN");
+    else if (turnQueueLen > 2)
+        gfx.printf("%s TURN", PLAYER_NAME[tc]);
+    else
+        gfx.print("ENEMY TURN");
 
     char goldStr[12];
-    snprintf(goldStr, sizeof(goldStr), "%ld", (long)gold[0]);
+    snprintf(goldStr, sizeof(goldStr), "%ld", (long)gold[HUMAN_COLOR]);
     int goldTextX = DISPLAY_WIDTH - 4 - (int)strlen(goldStr) * 6;
     drawCoin(goldTextX - 8, 7);
     gfx.setTextColor(GOLD_COLOR, BAND_BG);
@@ -2603,7 +2721,7 @@ void drawHud()
             gfx.fillRect(bx, MENU_BTN_Y + 8 + k * 6, bw, 3, TFT_WHITE);
     }
 
-    bool shopReady = currentTurn == 0 && !gameOver && ownedCastleCount(0) > 0;
+    bool shopReady = currentTurn == HUMAN_COLOR && !gameOver && !eliminated[HUMAN_COLOR] && ownedCastleCount(HUMAN_COLOR) > 0;
     uint16_t cartColor = shopReady ? GOLD_COLOR : 0x7BEF;
     gfx.fillRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_DARKGREY : 0x2104);
     gfx.drawRoundRect(SHOP_BTN_X, SHOP_BTN_Y, ICON_BTN, ICON_BTN, 4, shopReady ? TFT_WHITE : 0x7BEF);
@@ -2637,7 +2755,7 @@ void drawHud()
     if (showUnit >= 0 && showUnit < unitCount && units[showUnit].alive)
     {
         const UnitPlacement &iu = units[showUnit];
-        uint16_t ownerColor = iu.color == 0 ? TFT_CYAN : TFT_RED;
+        uint16_t ownerColor = PLAYER_HUD_COLOR[iu.color & 3];
         gfx.setTextColor(ownerColor, BAND_BG);
         gfx.setCursor(panelX, panelY);
         gfx.printf("%s  HP %d", UNIT_TYPE_NAMES[iu.type], iu.health);
@@ -2649,23 +2767,26 @@ void drawHud()
     }
     else
     {
-        int blueAlive = 0, redAlive = 0;
+        int aliveByColor[MAX_PLAYERS] = {0};
         for (int i = 0; i < unitCount; ++i)
-        {
-            if (!units[i].alive)
-                continue;
-            if (units[i].color == 0)
-                ++blueAlive;
-            else if (units[i].color == 1)
-                ++redAlive;
-        }
+            if (units[i].alive && units[i].color < MAX_PLAYERS)
+                aliveByColor[units[i].color]++;
+        // "N vs N [vs N ...]" for every side that started the mission.
         gfx.setCursor(panelX, panelY + 12);
-        gfx.setTextColor(TFT_CYAN, BAND_BG);
-        gfx.printf("%d", blueAlive);
-        gfx.setTextColor(TFT_WHITE, BAND_BG);
-        gfx.print(" units  vs  ");
-        gfx.setTextColor(TFT_RED, BAND_BG);
-        gfx.printf("%d", redAlive);
+        bool first = true;
+        for (int c = 0; c < MAX_PLAYERS; ++c)
+        {
+            if (startingUnits[c] <= 0)
+                continue;
+            if (!first)
+            {
+                gfx.setTextColor(TFT_WHITE, BAND_BG);
+                gfx.print(" vs ");
+            }
+            gfx.setTextColor(PLAYER_HUD_COLOR[c], BAND_BG);
+            gfx.printf("%d", aliveByColor[c]);
+            first = false;
+        }
     }
 }
 
@@ -2682,17 +2803,20 @@ struct SaveBlob
     uint32_t magic;
     int32_t mapIndex;
     int32_t turn;
-    int32_t gold[2];
+    int32_t gold[MAX_PLAYERS];
     int32_t viewX, viewY;
     int32_t count;
     int32_t mapCells; // mapWidth*mapHeight, must match on load
-    int32_t startUnits[2]; // per-side starting roster, for checkEndConditions()
+    int32_t startUnits[MAX_PLAYERS]; // per-side starting roster, for checkEndConditions()
+    int32_t queueLen;               // active sides this game
+    uint8_t queue[MAX_PLAYERS];     // turn order
+    uint8_t elim[MAX_PLAYERS];      // latched per-side defeat
     uint8_t over;
     int8_t winner;
     UnitPlacement units[MAX_UNITS];
     uint8_t tiles[SAVE_MAX_TILES];
 };
-constexpr uint32_t SAVE_MAGIC = 0x41453204; // "AE2", format 4 (per-side gold)
+constexpr uint32_t SAVE_MAGIC = 0x41453205; // "AE2", format 5 (N-player turn queue)
 
 bool hasSavedGame()
 {
@@ -2717,14 +2841,18 @@ bool saveGame()
     b.magic = SAVE_MAGIC;
     b.mapIndex = currentMapIndex;
     b.turn = currentTurn;
-    b.gold[0] = gold[0];
-    b.gold[1] = gold[1];
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+    {
+        b.gold[c] = gold[c];
+        b.startUnits[c] = startingUnits[c];
+        b.queue[c] = turnQueue[c];
+        b.elim[c] = eliminated[c] ? 1 : 0;
+    }
+    b.queueLen = turnQueueLen;
     b.viewX = viewX;
     b.viewY = viewY;
     b.count = unitCount;
     b.mapCells = (int32_t)cells;
-    b.startUnits[0] = startingUnits[0];
-    b.startUnits[1] = startingUnits[1];
     b.over = gameOver ? 1 : 0;
     b.winner = (int8_t)winnerColor;
     memcpy(b.units, units, sizeof(units));
@@ -2752,6 +2880,28 @@ bool loadGame()
         b.count < 0 || b.count > MAX_UNITS)
         return false;
 
+    // Validate the serialized turn model before anything indexes gold[]
+    // or walks the queue with it: length in range, every active colour
+    // unique and in range, the human side present (endTurn() assumes it
+    // can always hand control back to HUMAN_COLOR), and the saved current
+    // turn present in the queue. A corrupt/tampered blob otherwise reads
+    // gold[] out of bounds or spins switchTurn().
+    if (b.queueLen < 2 || b.queueLen > MAX_PLAYERS)
+        return false;
+    bool seen[MAX_PLAYERS] = {false};
+    bool turnInQueue = false;
+    for (int i = 0; i < (int)b.queueLen; ++i)
+    {
+        uint8_t c = b.queue[i];
+        if (c >= MAX_PLAYERS || seen[c])
+            return false;
+        seen[c] = true;
+        if ((int32_t)c == b.turn)
+            turnInQueue = true;
+    }
+    if (!turnInQueue || !seen[HUMAN_COLOR])
+        return false;
+
     // Reload terrain (no briefing/cutscene -- they ran when this game was
     // first started). If the map won't load, or its size no longer
     // matches the snapshot (assets changed under an old save), bail
@@ -2767,12 +2917,16 @@ bool loadGame()
     memcpy(mapTiles, b.tiles, (size_t)b.mapCells); // captured-building ownership
 
     currentTurn = (int)b.turn;
-    gold[0] = b.gold[0];
-    gold[1] = b.gold[1];
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+    {
+        gold[c] = b.gold[c];
+        startingUnits[c] = b.startUnits[c];
+        turnQueue[c] = b.queue[c];
+        eliminated[c] = b.elim[c] != 0;
+    }
+    turnQueueLen = (int)b.queueLen;
     unitCount = (int)b.count;
     memcpy(units, b.units, sizeof(units));
-    startingUnits[0] = b.startUnits[0];
-    startingUnits[1] = b.startUnits[1];
     gameOver = b.over != 0;
     winnerColor = b.winner;
     selectedUnit = infoUnit = -1;
@@ -2858,7 +3012,7 @@ void drawShop()
     gfx.setCursor(SHOP_X + 8, SHOP_Y + 7);
     gfx.print("RECRUIT");
     char gs[12];
-    snprintf(gs, sizeof(gs), "%ld", (long)gold[0]);
+    snprintf(gs, sizeof(gs), "%ld", (long)gold[HUMAN_COLOR]);
     int gx = SHOP_X + SHOP_W - 8 - (int)strlen(gs) * 6;
     drawCoin(gx - 8, SHOP_Y + 11);
     gfx.setCursor(gx, SHOP_Y + 7);
@@ -2867,7 +3021,7 @@ void drawShop()
     for (int i = 0; i < SHOP_BUYABLE_COUNT; ++i)
     {
         int ry = SHOP_Y + SHOP_HEAD_H + i * SHOP_ROW_H;
-        bool afford = gold[0] >= UNIT_COST[i] && unitCount < MAX_UNITS;
+        bool afford = gold[HUMAN_COLOR] >= UNIT_COST[i] && unitCount < MAX_UNITS;
         gfx.setTextColor(afford ? TFT_WHITE : 0x7BEF, SHOP_BG);
         gfx.setCursor(SHOP_X + 10, ry + 6);
         gfx.print(UNIT_TYPE_NAMES[i]);
@@ -3009,14 +3163,32 @@ void drawViewport()
 
     if (gameOver)
     {
-        uint16_t winColor = winnerColor == 0 ? TFT_BLUE : TFT_RED;
+        bool noWinner = winnerColor < 0 || winnerColor >= MAX_PLAYERS;
+        uint16_t winColor = noWinner ? TFT_WHITE : PLAYER_HUD_COLOR[winnerColor];
+        bool humanAlive = false, otherAlive = false;
+        for (int i = 0; i < unitCount; ++i)
+        {
+            if (!units[i].alive)
+                continue;
+            if (units[i].color == HUMAN_COLOR)
+                humanAlive = true;
+            else
+                otherAlive = true;
+        }
+        char banner[20];
+        if (!noWinner)
+            snprintf(banner, sizeof(banner), "%s WINS", PLAYER_NAME[winnerColor]);
+        else if (startingUnits[HUMAN_COLOR] > 0 && !humanAlive && otherAlive)
+            strcpy(banner, "DEFEAT"); // human wiped out, 2+ other sides fight on
+        else
+            strcpy(banner, "DRAW"); // nobody left standing
         gfx.fillRect(0, BANNER_Y, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
         gfx.drawFastHLine(0, BANNER_Y, DISPLAY_WIDTH, winColor);
         gfx.drawFastHLine(0, BANNER_Y + BANNER_H - 1, DISPLAY_WIDTH, winColor);
         gfx.setTextSize(2);
         gfx.setTextColor(winColor, TFT_BLACK);
-        gfx.setCursor(30, BANNER_Y + 4);
-        gfx.print(winnerColor == 0 ? "BLUE WINS" : "RED WINS");
+        gfx.setCursor((DISPLAY_WIDTH - (int)strlen(banner) * 12) / 2, BANNER_Y + 4);
+        gfx.print(banner);
         gfx.setTextSize(1);
 
         // Retry the same mission without a trip through the menu -- tap
