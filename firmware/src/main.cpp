@@ -679,15 +679,13 @@ void checkEndConditions()
     }
 
     // The human losing its last unit is a terminal defeat -- the mission
-    // ends here even if two or more AI sides are still fighting. This is
-    // deliberate, not the last-side-standing rule below: once the human
-    // is eliminated switchTurn() skips its (still-present) queue slot, so
-    // endTurn() would just spin the remaining sides against each other
-    // with no way to hand control back -- an AI-vs-AI game the player
-    // can't influence or watch. winnerColor is set to the sole survivor
-    // if exactly one side is left, else -1; the banner then reads WINS /
-    // DEFEAT (one+ AI sides survived) / DRAW (nobody did) -- see
-    // drawViewport().
+    // ends here even with two or more AI sides still fighting. This is
+    // deliberate, not the last-side-standing rule below: every remaining
+    // side is AI, so there is nothing left for the player to do (they
+    // can't act, and there's no spectator mode). winnerColor is the sole
+    // survivor when exactly one AI side is left (banner: "<SIDE> WINS"),
+    // otherwise -1 -- which drawViewport() renders as DEFEAT if any AI
+    // side is still standing, or DRAW if none is.
     if (startingUnits[HUMAN_COLOR] > 0 && alive[HUMAN_COLOR] == 0)
     {
         gameOver = true;
