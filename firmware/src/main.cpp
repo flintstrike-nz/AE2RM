@@ -46,7 +46,10 @@
 // your castles to deploy it. The AI recruits too. A unit that starts its
 // side's turn on a neutral town or a building that side owns heals up to
 // 20 HP. MENU opens an in-mission pause menu -- return / save / load (an
-// NVS snapshot) / exit to title. The turn model runs a queue of up to four
+// NVS snapshot) / sound on-off / exit to title. A small square-wave synth
+// (src/audio.cpp) plays a chiptune-ish menu and battle loop plus one-shot
+// effects through the ES8311 codec -- best-effort, silent if the codec
+// won't come up. The turn model runs a queue of up to four
 // sides (story maps m0-m7 are always 2: color 0 blue = human, color 1 red
 // = AI); endTurn() resolves every AI side in the queue before control
 // returns to the human. A mission ends when only one side still has units
@@ -66,6 +69,7 @@
 #include "LGFX_Config.h"
 #include "board_pins.h"
 #include "embedded_assets.h"
+#include "audio.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -716,6 +720,8 @@ void checkEndConditions()
     {
         gameOver = true;
         winnerColor = (sidesLeft == 1) ? lastLeft : -1;
+        audioMusic(MUSIC_OFF);
+        audioSfx(SFX_DEFEAT);
         Serial.println("game over: human side eliminated -- defeat");
         return;
     }
@@ -727,6 +733,8 @@ void checkEndConditions()
 
     gameOver = true;
     winnerColor = lastLeft; // -1 if every side was wiped out at once
+    audioMusic(MUSIC_OFF);
+    audioSfx(winnerColor == HUMAN_COLOR ? SFX_VICTORY : SFX_DEFEAT);
     Serial.printf("game over: color %d wins (%d of %d sides eliminated)\n",
                   winnerColor, sidesStarted - sidesLeft, sidesStarted);
 }
@@ -927,6 +935,7 @@ void playHitEffect(int unitIdx, int hit)
 constexpr unsigned long COUNTERATTACK_PAUSE_MS = 300;
 void attackUnit(int attackerIdx, int victimIdx)
 {
+    audioSfx(SFX_HIT);
     int hit = resolveHit(attackerIdx, victimIdx);
     playHitEffect(victimIdx, hit);
 
@@ -1231,6 +1240,8 @@ inline int menuRowH() { return menuTab == MENU_TAB_SKIRMISH ? 22 : 28; }
 
 void drawMenu()
 {
+    audioMusic(MUSIC_TITLE); // the menu is the one screen that's always the title theme
+
     gfx.startWrite();
     gfx.fillScreen(TFT_BLACK);
     gfx.setTextSize(2);
@@ -2078,6 +2089,7 @@ bool startGame(int mapIndex, bool interactive = true, bool skirmish = false)
     recountStartingUnits(); // so the first render's footer tally isn't blank
 
     appState = STATE_PLAYING;
+    audioMusic(MUSIC_BATTLE);
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
@@ -2106,6 +2118,7 @@ void handleMenuTap(int screenX, int screenY)
                 if (t != menuTab)
                 {
                     menuTab = t;
+                    audioSfx(SFX_UI_BLIP);
                     drawMenu();
                 }
                 return;
@@ -2120,6 +2133,7 @@ void handleMenuTap(int screenX, int screenY)
         int rowY = MENU_ROW_TOP + i * rowH;
         if (screenX >= 20 && screenX < DISPLAY_WIDTH - 20 && screenY >= rowY && screenY < rowY + rowH - 6)
         {
+            audioSfx(SFX_UI_BLIP);
             startGame(i, true, menuTab == MENU_TAB_SKIRMISH);
             return;
         }
@@ -2630,7 +2644,7 @@ constexpr int RETRY_BTN_Y = BANNER_Y + BANNER_H + 8;
 // Pause menu (hamburger) -- a centred list, shared between drawPauseMenu()
 // and handleTap(). Rows: Return to game / Save game / Load game / Exit to
 // title.
-enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_EXIT, PM_ROWS };
+enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_MUTE, PM_EXIT, PM_ROWS };
 constexpr int PM_W = 176;
 constexpr int PM_ROW_H = 30;
 constexpr int PM_PAD = 6;
@@ -2709,6 +2723,7 @@ void tryCaptureBuilding(const UnitPlacement &u)
         return;
 
     mapTiles[u.tileX * mapHeight + u.tileY] = setBuildingFraction(tile, myFraction);
+    audioSfx(SFX_CAPTURE);
     Serial.printf("unit captured %s at (%d,%d) for color %d\n", isCastle ? "castle" : "village", u.tileX, u.tileY, u.color);
 }
 
@@ -2761,6 +2776,7 @@ void handleTap(int screenX, int screenY)
                 nu.hasMoved = false; // usable this turn, like the original
                 nu.alive = true;
                 nu.health = 100;
+                audioSfx(SFX_RECRUIT);
                 Serial.printf("recruited type %d at (%d,%d) for %d, gold now %ld\n",
                               shopBuyType, mx, my, UNIT_COST[shopBuyType], (long)gold[HUMAN_COLOR]);
                 startingUnits[0]++; // it's now part of blue's roster
@@ -2814,6 +2830,14 @@ void handleTap(int screenX, int screenY)
                     delay(900);
                     drawMenu();
                 }
+                return;
+            }
+            else if (i == PM_MUTE)
+            {
+                if (!audioAvailable())
+                    return; // disabled row
+                audioToggleMute();
+                drawViewport(); // repaints the pause menu with the new label
                 return;
             }
             else // PM_EXIT
@@ -2963,6 +2987,7 @@ void handleTap(int screenX, int screenY)
         {
             int16_t fromX = sel.tileX, fromY = sel.tileY;
             uint8_t destBefore = tileAt(mx, my);
+            audioSfx(SFX_MOVE);
             walkUnitTo(mv, mx, my);
             sel.hasMoved = true;
             tryCaptureBuilding(sel);
@@ -2997,6 +3022,7 @@ void handleTap(int screenX, int screenY)
     {
         infoUnit = -1;
         selectedUnit = idx;
+        audioSfx(SFX_SELECT);
         computeReachable(units[idx]);
         drawViewport();
     }
@@ -3352,14 +3378,19 @@ void toast(const char *msg)
 
 void drawPauseMenu()
 {
-    static const char *LABELS[PM_ROWS] = {"Return to game", "Save game", "Load game", "Exit to title"};
+    const char *LABELS[PM_ROWS];
+    LABELS[PM_RETURN] = "Return to game";
+    LABELS[PM_SAVE] = "Save game";
+    LABELS[PM_LOAD] = "Load game";
+    LABELS[PM_MUTE] = !audioAvailable() ? "Sound: n/a" : audioMuted() ? "Sound: off" : "Sound: on";
+    LABELS[PM_EXIT] = "Exit to title";
     gfx.fillRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, 0x2945);
     gfx.drawRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, TFT_WHITE);
     gfx.setTextSize(1);
     for (int i = 0; i < PM_ROWS; ++i)
     {
         int ry = PM_Y + PM_PAD + i * PM_ROW_H;
-        bool disabled = (i == PM_LOAD && !hasSavedGame());
+        bool disabled = (i == PM_LOAD && !hasSavedGame()) || (i == PM_MUTE && !audioAvailable());
         gfx.fillRoundRect(PM_X + 6, ry, PM_W - 12, PM_ROW_H - 4, 4, disabled ? 0x2104 : TFT_DARKGREY);
         gfx.setTextColor(disabled ? 0x8410 : TFT_WHITE, disabled ? 0x2104 : TFT_DARKGREY);
         gfx.setCursor(PM_X + 16, ry + (PM_ROW_H - 4 - 8) / 2);
@@ -3847,6 +3878,9 @@ void setup()
     }
 
     loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
+
+    audioInit();               // best-effort; silent if the codec/I2S won't come up
+    audioMusic(MUSIC_TITLE);
 
     if (TOUCH_DEBUG)
         touchTest();

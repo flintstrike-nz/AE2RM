@@ -361,6 +361,19 @@ not yet confirmed on-device.
   original's turn-start heal loop.
 - WiFi + OTA updates (`ArduinoOTA`): flash once over USB, then push
   subsequent builds wirelessly — see "Build & flash" below
+- Sound (`src/audio.cpp`): a tiny square-wave + noise synth feeding the
+  board's **ES8311 codec** over I2S (16 kHz mono, codec on the shared
+  touch I2C bus, amp on `PIN_AUDIO_PA_EN`). This is a **chiptune
+  approximation**, not the original MIDI tracks: two short hand-written
+  looping themes (`MUSIC_TITLE` for the menu, `MUSIC_BATTLE` in a
+  mission) and eight one-shot effects (`SfxId` — UI blip, select, move,
+  hit, capture, recruit, victory, defeat) wired into the matching game
+  events. A **Sound: on/off** row in the pause menu toggles mute, which
+  is persisted (`Preferences` `"aeii"`/`"mute"`). `audioInit()` is
+  best-effort — if the codec doesn't ACK on I2C or the I2S driver won't
+  install, audio just stays disabled and every call no-ops (the pause
+  row then reads "Sound: n/a"). **The codec register sequence and I2S
+  clocking are unverified by ear** — see the verification section.
 
 ## What's not implemented yet
 
@@ -369,11 +382,11 @@ tutorial `ShowHelp` overlays checked against live game state, and the
 `CompleteMission` epilogue dialog; not what's causing `m4`/`m6`'s missing
 red units, see above), the original's actual AI (this milestone's is a
 simple heuristic -- see above), a per-mission `allowedUnits` cap on which
-unit types the shop offers, the combat property bonuses noted above,
-MIDI music (needs its own synth — see
-the "Music" question this was scoped against), and the skirmish pre-match
-setup screen (choose your fraction, teams, start gold, unit cap -- this
-port fixes all of those, see the skirmish section above). The original
+unit types the shop offers, playback of the **actual MIDI tracks** (the
+sound section above is a chiptune approximation with hand-written loops,
+not a MIDI sequencer), and the skirmish pre-match setup screen (choose
+your fraction, teams, start gold, unit cap -- this port fixes all of
+those, see the skirmish section above). The original
 `MainDisplayable.java` is
 ~11,000 lines covering all of that; this milestone reads its map-loading
 format, terrain layer, unit starting positions, enough movement/combat/
@@ -456,11 +469,15 @@ attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
 `main.cpp` were cross-checked field-by-field against `tiles0.prop` and
 each `*.unit` file. **The firmware is flashed to the board and boots**
 — PSRAM init, the embedded-asset fallback, the locale-string table, WiFi
-association and the OTA listener all come up clean over USB serial each
-build. What isn't verified is anything that needs a human at the screen:
-touch accuracy, the tap/drag split, combat and capture, a full AI turn,
-the walk animation's pacing, undo, a mission played to its win banner —
-this environment can flash and read the boot log but can't drive the
+association, the OTA listener, and the audio subsystem (`audio: ready` —
+the ES8311 ACKs on I2C, the I2S driver installs, the synth task starts)
+all come up clean over USB serial each build. What isn't verified is
+anything that needs a human at the screen or the speaker: touch
+accuracy, the tap/drag split, combat and capture, a full AI turn, the
+walk animation's pacing, undo, a mission played to its win banner, and
+**whether any sound actually comes out** — the ES8311 register values,
+the I2S clock ratios and the mix levels are all untested by ear. This
+environment can flash and read the boot log but can't drive the
 game. The AI has no recursion and no
 `while(true)`; its one loop with a runtime-dependent trip count
 (`computeReachable()`'s `while (changed)` relaxation) terminates because
