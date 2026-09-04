@@ -23,8 +23,12 @@ constexpr int NUM_TONE_VOICES = 3; // 0 melody, 1 bass, 2 SFX (preempts)
 constexpr int SFX_VOICE = 2;
 
 bool g_ready = false;
-std::atomic<bool> g_muted{false}; // written by the game task, read by the synth task
+std::atomic<int> g_vol{2}; // 0..AUDIO_VOL_MAX; written by the game task, read by the synth task
 MusicId g_music = MUSIC_OFF; // only touched under g_mux
+
+// Master gain per volume level (index 0..AUDIO_VOL_MAX). Level 0 is
+// silence; the rest leave headroom for 3 square voices + noise.
+constexpr int VOL_GAIN[AUDIO_VOL_MAX + 1] = {0, 14, 28, 46};
 
 // ---------------------------------------------------------------------------
 // ES8311 codec -- minimal DAC-only bring-up. Transcribed from Espressif's
@@ -301,7 +305,8 @@ void renderBlock(int16_t *out, int n)
     portEXIT_CRITICAL(&g_mux);
 
     // --- render ---
-    const int master = audioMuted() ? 0 : 42; // headroom for 3 voices + noise
+    int lvl = g_vol.load();
+    const int master = VOL_GAIN[lvl < 0 ? 0 : lvl > AUDIO_VOL_MAX ? AUDIO_VOL_MAX : lvl];
     for (int i = 0; i < n; ++i)
     {
         int32_t acc = 0;
@@ -356,7 +361,8 @@ bool audioInit()
         Preferences p;
         if (p.begin("aeii", true))
         {
-            g_muted = p.getBool("mute", false);
+            int v = p.getInt("vol", 2);
+            g_vol = (v < 0) ? 0 : (v > AUDIO_VOL_MAX) ? AUDIO_VOL_MAX : v;
             p.end();
         }
     }
@@ -394,13 +400,13 @@ bool audioInit()
     }
 
     g_ready = true;
-    Serial.printf("audio: ready (muted=%d)\n", (int)g_muted.load());
+    Serial.printf("audio: ready (vol=%d)\n", g_vol.load());
     return true;
 }
 
 void audioSfx(SfxId id)
 {
-    if (!g_ready || g_muted || id < 0 || id >= SFX_COUNT)
+    if (!g_ready || g_vol.load() == 0 || id < 0 || id >= SFX_COUNT)
         return;
     startSfx(id);
 }
@@ -419,16 +425,24 @@ void audioMusic(MusicId id)
     portEXIT_CRITICAL(&g_mux);
 }
 
-void audioToggleMute()
+void audioCycleVolume()
 {
-    g_muted = !g_muted;
+    g_vol = (g_vol.load() + 1) % (AUDIO_VOL_MAX + 1);
     Preferences p;
     if (p.begin("aeii", false))
     {
-        p.putBool("mute", g_muted);
+        p.putInt("vol", g_vol.load());
         p.end();
     }
 }
 
-bool audioMuted() { return g_muted; }
+int audioVolume() { return g_vol.load(); }
+
+const char *audioVolumeLabel()
+{
+    static const char *L[AUDIO_VOL_MAX + 1] = {"Off", "Low", "Med", "High"};
+    int v = g_vol.load();
+    return L[v < 0 ? 0 : v > AUDIO_VOL_MAX ? AUDIO_VOL_MAX : v];
+}
+
 bool audioAvailable() { return g_ready; }

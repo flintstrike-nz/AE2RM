@@ -857,7 +857,7 @@ void playHitEffect(int unitIdx, int hit)
 
     constexpr int SPARK_FRAME_W = 20, SPARK_FRAME_H = 20, SPARK_FRAME_COUNT = 6;
     constexpr size_t FRAME_PIXELS = (size_t)SPARK_FRAME_W * SPARK_FRAME_H;
-    constexpr unsigned long FRAME_DELAY_MS = 60;
+    constexpr unsigned long FRAME_DELAY_MS = 90;
 
     // Loaded once and cached (in .bss, not PSRAM -- 2400 pixels total is
     // trivial) since combat calls this repeatedly; sheetLoaded latches
@@ -1088,7 +1088,7 @@ void walkUnitTo(int unitIdx, int destX, int destY)
         audioSfx(SFX_MOVE); // every actual move -- human plain/move-then-attack and AI
         uint8_t path[24][2];
         int n = reconstructPath(u.tileX, u.tileY, destX, destY, path, 24);
-        constexpr unsigned long STEP_MS = 55;
+        constexpr unsigned long STEP_MS = 95; // per-tile walk pace
         for (int i = 0; i < n; ++i)
         {
             u.tileX = (int16_t)path[i][0];
@@ -2647,8 +2647,8 @@ constexpr int RETRY_BTN_Y = BANNER_Y + BANNER_H + 8;
 
 // Pause menu (hamburger) -- a centred list, shared between drawPauseMenu()
 // and handleTap(). Rows: Return to game / Save game / Load game /
-// Sound on-off / Exit to title.
-enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_MUTE, PM_EXIT, PM_ROWS };
+// Sound (tap to cycle Off/Low/Med/High) / Exit to title.
+enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_SOUND, PM_EXIT, PM_ROWS };
 constexpr int PM_W = 176;
 constexpr int PM_ROW_H = 30;
 constexpr int PM_PAD = 6;
@@ -2836,12 +2836,12 @@ void handleTap(int screenX, int screenY)
                 }
                 return;
             }
-            else if (i == PM_MUTE)
+            else if (i == PM_SOUND)
             {
                 if (!audioAvailable())
                     return; // disabled row
-                audioToggleMute();
-                drawViewport(); // repaints the pause menu with the new label
+                audioCycleVolume(); // Off -> Low -> Med -> High -> Off
+                drawViewport();      // repaints the pause menu with the new label
                 return;
             }
             else // PM_EXIT
@@ -3387,7 +3387,9 @@ void drawPauseMenu()
     LABELS[PM_RETURN] = "Return to game";
     LABELS[PM_SAVE] = "Save game";
     LABELS[PM_LOAD] = "Load game";
-    LABELS[PM_MUTE] = !audioAvailable() ? "Sound: n/a" : audioMuted() ? "Sound: off" : "Sound: on";
+    static char soundLabel[20];
+    snprintf(soundLabel, sizeof(soundLabel), "Sound: %s", audioAvailable() ? audioVolumeLabel() : "n/a");
+    LABELS[PM_SOUND] = soundLabel;
     LABELS[PM_EXIT] = "Exit to title";
     gfx.fillRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, 0x2945);
     gfx.drawRoundRect(PM_X, PM_Y, PM_W, PM_H, 6, TFT_WHITE);
@@ -3395,7 +3397,7 @@ void drawPauseMenu()
     for (int i = 0; i < PM_ROWS; ++i)
     {
         int ry = PM_Y + PM_PAD + i * PM_ROW_H;
-        bool disabled = (i == PM_LOAD && !hasSavedGame()) || (i == PM_MUTE && !audioAvailable());
+        bool disabled = (i == PM_LOAD && !hasSavedGame()) || (i == PM_SOUND && !audioAvailable());
         gfx.fillRoundRect(PM_X + 6, ry, PM_W - 12, PM_ROW_H - 4, 4, disabled ? 0x2104 : TFT_DARKGREY);
         gfx.setTextColor(disabled ? 0x8410 : TFT_WHITE, disabled ? 0x2104 : TFT_DARKGREY);
         gfx.setCursor(PM_X + 16, ry + (PM_ROW_H - 4 - 8) / 2);

@@ -68,7 +68,7 @@ misc pins are transcribed from vendor docs and not confirmed on-device.
   original's `.unit` files and `tiles0.prop` — see the tables' comments
   in `main.cpp`). Tap a highlighted tile to move there; the unit walks
   the path one tile at a time (`walkUnitTo()` reconstructs it from the
-  `computeReachable()` cost gradient and steps it with a ~55ms delay per
+  `computeReachable()` cost gradient and steps it with a short delay per
   tile) rather than teleporting -- AI moves animate the same way. Tap END
   TURN to pass to the AI (see below).
 - Undo: right after a plain move (no capture, no attack) an **UNDO**
@@ -370,12 +370,12 @@ misc pins are transcribed from vendor docs and not confirmed on-device.
   looping themes (`MUSIC_TITLE` for the menu, `MUSIC_BATTLE` in a
   mission) and eight one-shot effects (`SfxId` — UI blip, select, move,
   hit, capture, recruit, victory, defeat) wired into the matching game
-  events. A **Sound: on/off** row in the pause menu toggles mute, which
-  is persisted (`Preferences` `"aeii"`/`"mute"`). `audioInit()` is
-  best-effort — if the codec doesn't ACK on I2C or the I2S driver won't
-  install, audio just stays disabled and every call no-ops (the pause
-  row then reads "Sound: n/a"). **The codec register sequence and I2S
-  clocking are unverified by ear** — see the verification section.
+  events. A **Sound** row in the pause menu cycles the volume
+  Off/Low/Med/High (`audioCycleVolume()`, master-gain levels in
+  `VOL_GAIN`), persisted in `Preferences` `"aeii"`/`"vol"`. `audioInit()`
+  is best-effort — if the codec doesn't ACK on I2C or the I2S driver
+  won't install, audio stays disabled and every call no-ops (the pause
+  row then reads "Sound: n/a").
 
 ## What's not implemented yet
 
