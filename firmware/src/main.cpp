@@ -2882,9 +2882,10 @@ bool loadGame()
 
     // Validate the serialized turn model before anything indexes gold[]
     // or walks the queue with it: length in range, every active colour
-    // unique and in range, and the saved current turn present in the
-    // queue. A corrupt/tampered blob otherwise reads gold[] out of
-    // bounds or spins switchTurn().
+    // unique and in range, the human side present (endTurn() assumes it
+    // can always hand control back to HUMAN_COLOR), and the saved current
+    // turn present in the queue. A corrupt/tampered blob otherwise reads
+    // gold[] out of bounds or spins switchTurn().
     if (b.queueLen < 2 || b.queueLen > MAX_PLAYERS)
         return false;
     bool seen[MAX_PLAYERS] = {false};
@@ -2898,7 +2899,7 @@ bool loadGame()
         if ((int32_t)c == b.turn)
             turnInQueue = true;
     }
-    if (!turnInQueue)
+    if (!turnInQueue || !seen[HUMAN_COLOR])
         return false;
 
     // Reload terrain (no briefing/cutscene -- they ran when this game was
