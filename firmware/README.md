@@ -133,10 +133,13 @@ not yet confirmed on-device.
   this loads its buffer fresh per tick and frees it once nothing's active
   -- the intro script only triggers a handful of these total, so there's
   nothing worth keeping cached.
-- Basic AI (`aiActUnit()` in `main.cpp`): color 1 (red) is always the
-  computer, color 0 (blue) is always you -- there's no way to flip this,
-  and the two-human hotseat mode from earlier milestones no longer
-  applies (`endTurn()` always auto-resolves red's turn through the AI).
+- Basic AI (`aiActUnit()` in `main.cpp`): color 0 (blue) is always you;
+  every other colour in the turn queue is computer-controlled (just
+  color 1/red on the story maps this ships, but the model is N-side --
+  see "Turn model" below). There's no way to flip this, and the
+  two-human hotseat mode from earlier milestones no longer applies
+  (`endTurn()` auto-resolves every AI side's turn before handing control
+  back to you).
   Each AI unit, in order: attacks an enemy already in range from where it
   stands; else, if some reachable tile puts an enemy in range, moves
   there and attacks (the AI *is* allowed "move then attack" -- for the
@@ -193,9 +196,13 @@ not yet confirmed on-device.
   so a later recruit can't undo it. A side that started with zero units
   (`m4`/`m6` place no red units) is exempt -- its emptiness isn't a
   defeat. The mission ends once at most one side that started with units
-  still has any. This is a simplification of the original, which ties
-  defeat more to castle capture/`fractionKings` bookkeeping this port
-  doesn't track. The banner names the surviving side in its HUD colour
+  still has any -- with one deliberate exception: the **human** losing
+  its last unit is a terminal defeat immediately, even if two or more AI
+  sides are still fighting, since whatever's left is an AI-vs-AI game the
+  player can neither influence nor watch. This is all a simplification of
+  the original, which ties defeat more to castle capture/`fractionKings`
+  bookkeeping this port doesn't track. The banner names the surviving
+  side in its HUD colour
   ("BLUE WINS" / "RED WINS" on story maps, "GREEN WINS" etc. once a
   skirmish queue has more than two sides), shows **DEFEAT** if the human
   is wiped out while two or more other sides fight on, and **DRAW** if
