@@ -402,6 +402,42 @@ constexpr int SKIRMISH_START_GOLD = 2000;
 // read by the RETRY button so it reloads the right map set.
 static bool skirmishMode = false;
 
+// Story-mode progression: the highest story index the player may start.
+// 0 = only m0; beating story level i unlocks i+1 (capped at the last
+// map). Persisted in Preferences "aeii"/"unlocked", loaded in setup().
+// Skirmish maps are never gated -- all 12 are always selectable.
+static int unlockedStoryLevel = 0;
+
+void loadUnlockedLevel()
+{
+    Preferences p;
+    if (!p.begin("aeii", true))
+        return;
+    int v = p.getInt("unlocked", 0);
+    p.end();
+    unlockedStoryLevel = (v < 0) ? 0 : (v >= STORY_MAP_COUNT) ? STORY_MAP_COUNT - 1 : v;
+}
+
+// Called on a story-map victory: unlock the next level if this was the
+// current frontier (or beyond, e.g. after a save transfer).
+void markStoryLevelComplete()
+{
+    if (skirmishMode || currentMapIndex < 0)
+        return;
+    int next = currentMapIndex + 1;
+    if (next > unlockedStoryLevel && next < STORY_MAP_COUNT)
+    {
+        unlockedStoryLevel = next;
+        Preferences p;
+        if (p.begin("aeii", false))
+        {
+            p.putInt("unlocked", unlockedStoryLevel);
+            p.end();
+        }
+        Serial.printf("story: level %d complete, unlocked %d\n", currentMapIndex, unlockedStoryLevel);
+    }
+}
+
 enum AppState
 {
     STATE_MENU,
@@ -727,6 +763,21 @@ void checkEndConditions()
         return;
     }
 
+    // A mission where the human is the only side that ever had units
+    // (m4/m6 -- no opposition in the .aem data, and the reinforcement
+    // script isn't ported) is a trivial win, not an unwinnable sandbox --
+    // otherwise story progression would dead-end there.
+    if (sidesStarted == 1 && startingUnits[HUMAN_COLOR] > 0 && alive[HUMAN_COLOR] > 0)
+    {
+        gameOver = true;
+        winnerColor = HUMAN_COLOR;
+        audioMusic(MUSIC_OFF);
+        audioSfx(SFX_VICTORY);
+        markStoryLevelComplete();
+        Serial.println("game over: no opposition on this map -- victory");
+        return;
+    }
+
     // Nothing to decide on a one-side sandbox map; otherwise the mission
     // ends once at most one side still has units.
     if (sidesStarted < 2 || sidesLeft > 1)
@@ -736,6 +787,8 @@ void checkEndConditions()
     winnerColor = lastLeft; // -1 if every side was wiped out at once
     audioMusic(MUSIC_OFF);
     audioSfx(winnerColor == HUMAN_COLOR ? SFX_VICTORY : SFX_DEFEAT);
+    if (winnerColor == HUMAN_COLOR)
+        markStoryLevelComplete();
     Serial.printf("game over: color %d wins (%d of %d sides eliminated)\n",
                   winnerColor, sidesStarted - sidesLeft, sidesStarted);
 }
@@ -1275,17 +1328,28 @@ void drawMenu()
     int base = skirmish ? SKIRMISH_TITLE_STRING_BASE : MISSION_TITLE_STRING_BASE;
     for (int i = 0; i < menuRowCount(); ++i)
     {
+        // Story maps unlock in order (beat i to unlock i+1); skirmish
+        // maps are all open.
+        bool locked = !skirmish && i > unlockedStoryLevel;
+        bool done = !skirmish && i < unlockedStoryLevel;
         int rowY = MENU_ROW_TOP + i * rowH;
-        gfx.fillRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, TFT_DARKGREY);
-        gfx.drawRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, TFT_WHITE);
+        gfx.fillRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, locked ? 0x2104 : TFT_DARKGREY);
+        gfx.drawRect(20, rowY, DISPLAY_WIDTH - 40, rowH - 6, locked ? 0x4208 : TFT_WHITE);
         gfx.setTextSize(textSize);
-        gfx.setTextColor(TFT_WHITE, TFT_DARKGREY);
+        gfx.setTextColor(locked ? 0x7BEF : TFT_WHITE, locked ? 0x2104 : TFT_DARKGREY);
         gfx.setCursor(30, rowY + (skirmish ? 4 : 6));
         const char *title = getScriptString(base + i);
         if (title[0])
             gfx.print(title);
         else
             gfx.printf(skirmish ? "Skirmish %d" : "Mission %d", i + 1);
+        // A tick at the right edge for a beaten story level.
+        if (done)
+        {
+            int cx = DISPLAY_WIDTH - 34, cy = rowY + (rowH - 6) / 2;
+            gfx.drawLine(cx - 4, cy, cx - 1, cy + 3, TFT_GREEN);
+            gfx.drawLine(cx - 1, cy + 3, cx + 5, cy - 4, TFT_GREEN);
+        }
     }
     gfx.endWrite();
 }
@@ -2137,8 +2201,11 @@ void handleMenuTap(int screenX, int screenY)
         int rowY = MENU_ROW_TOP + i * rowH;
         if (screenX >= 20 && screenX < DISPLAY_WIDTH - 20 && screenY >= rowY && screenY < rowY + rowH - 6)
         {
+            bool skirmish = (menuTab == MENU_TAB_SKIRMISH);
+            if (!skirmish && i > unlockedStoryLevel)
+                return; // locked -- beat the level before it first
             audioSfx(SFX_UI_BLIP);
-            startGame(i, true, menuTab == MENU_TAB_SKIRMISH);
+            startGame(i, true, skirmish);
             return;
         }
     }
@@ -3884,6 +3951,7 @@ void setup()
     }
 
     loadStrings(); // best-effort; see its comment -- missing strings.dat degrades, doesn't block boot
+    loadUnlockedLevel();
 
     audioInit();               // best-effort; silent if the codec/I2S won't come up
     audioMusic(MUSIC_TITLE);
