@@ -52,10 +52,13 @@ void audioSfx(SfxId id);
 // audio is disabled; still tracked (and honoured on unmute) if muted.
 void audioMusic(MusicId id);
 
-// Toggle / query mute. The new state is persisted (Preferences
-// "aeii"/"mute") so it survives a reboot.
-void audioToggleMute();
-bool audioMuted();
+// Volume: 0 = off (mute), 1..AUDIO_VOL_MAX = quiet..loud.
+// audioCycleVolume() steps 0->1->...->MAX->0. The level is persisted
+// (Preferences "aeii"/"vol") so it survives a reboot.
+constexpr int AUDIO_VOL_MAX = 3;
+void audioCycleVolume();
+int audioVolume(); // 0 == muted
+const char *audioVolumeLabel(); // "Off" / "Low" / "Med" / "High"
 
 // True once audioInit() has succeeded -- for a HUD indicator / menu row.
 bool audioAvailable();
