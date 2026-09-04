@@ -26,7 +26,8 @@
 // (one action per unit per turn: a move, or a move-then-attack, matching
 // the original). Right after a plain move an UNDO button (footer-left)
 // puts the unit back and un-spends its turn, until you do anything else.
-// A unit that has used its action is greyed out until next turn. Every
+// A unit that has used its action is greyed out for the rest of its
+// side's turn (full colour again once the turn passes). Every
 // hit -- and the counterattack, if it happens -- plays the original's own
 // spark effect and a rising damage number over the target (see
 // playHitEffect()), paced so both are actually visible. Tap
@@ -3527,13 +3528,14 @@ void drawViewport()
         if (px <= -UNIT_ICON_SIZE || px >= DISPLAY_WIDTH ||
             py <= MAP_VIEW_Y - UNIT_ICON_SIZE || py >= MAP_VIEW_Y + MAP_VIEW_H)
             continue;
-        // A unit that has used its action is done until its side's next
-        // turn (switchTurn() clears hasMoved then) -- draw it desaturated +
-        // dimmed so it reads as unavailable, keyed on hasMoved alone so
-        // your spent units stay greyed through the AI's turn too. Per
+        // A unit that has used its action this turn is drawn desaturated +
+        // dimmed so it reads as unavailable -- but only while it's that
+        // side's turn. Once the turn passes, every unit is back to full
+        // colour (the spent flag is still set until switchTurn() clears it
+        // on that side's next turn, it just isn't shown any more). Per
         // pixel, so the sprite's transparent edges are untouched.
         const uint16_t *frame = unitIconFrame(u.color, u.type);
-        if (u.hasMoved)
+        if (u.hasMoved && u.color == currentTurn)
         {
             static uint16_t greyed[UNIT_ICON_SIZE * UNIT_ICON_SIZE];
             desaturateIcon(frame, greyed);
