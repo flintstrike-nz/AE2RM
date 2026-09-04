@@ -26,7 +26,14 @@
 
 // --- Audio codec (ES8311, I2C addr 0x18 — shares the touch I2C bus) + I2S ---
 // Not used by the firmware yet; recorded here for the next milestone.
-#define PIN_AUDIO_PA_EN 1  // codec enable / speaker amp
+#define PIN_AUDIO_PA_EN 1  // speaker amp enable
+// GPIO level that ENABLES the amp. The xiaozhi-esp32 firmware for this
+// class of board drives it high to enable, so that's the default here --
+// but the polarity isn't confirmed on this exact board (Copilot's review
+// of the audio PR believed it active-low). If there's no sound, try
+// flipping this to 0.
+#define AUDIO_PA_EN_ON  1
+#define AUDIO_PA_EN_OFF (!AUDIO_PA_EN_ON)
 #define PIN_I2S_MCLK    4
 #define PIN_I2S_BCLK    5
 #define PIN_I2S_WS      7  // LRCK

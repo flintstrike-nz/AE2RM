@@ -80,7 +80,7 @@ bool es8311Init()
     for (auto &s : seq)
         ok &= es8311Write(s.reg, s.val);
     if (!ok)
-        Serial.println("audio: ES8311 register write failed (continuing)");
+        Serial.println("audio: ES8311 register write failed");
     return ok;
 }
 
@@ -357,27 +357,32 @@ bool audioInit()
     }
 
     pinMode(PIN_AUDIO_PA_EN, OUTPUT);
-    digitalWrite(PIN_AUDIO_PA_EN, LOW); // amp off until the codec is configured
+    digitalWrite(PIN_AUDIO_PA_EN, AUDIO_PA_EN_OFF); // amp muted until everything's up
 
-    if (!es8311Init())
-    {
-        Serial.println("audio: disabled (ES8311 setup failed)");
-        return false; // leave the amp off -- contract: audioAvailable() == false
-    }
+    // I2S first: the ES8311 wants MCLK/BCLK/LRCK present before its
+    // control registers are written (its power-up guidance, and the
+    // order the working ES3C28P bring-up uses).
     if (!i2sInit())
     {
         Serial.println("audio: disabled (I2S init failed)");
         return false;
     }
+    delay(10); // let the I2S clocks settle
+    if (!es8311Init())
+    {
+        Serial.println("audio: disabled (ES8311 setup failed)");
+        i2s_driver_uninstall(I2S_PORT);
+        return false; // amp still off -- contract: audioAvailable() == false
+    }
 
-    digitalWrite(PIN_AUDIO_PA_EN, HIGH);
+    digitalWrite(PIN_AUDIO_PA_EN, AUDIO_PA_EN_ON);
 
     BaseType_t ok = xTaskCreatePinnedToCore(synthTask, "synth", 3072, nullptr, 1, nullptr, 0);
     if (ok != pdPASS)
     {
         Serial.println("audio: synth task create failed");
+        digitalWrite(PIN_AUDIO_PA_EN, AUDIO_PA_EN_OFF);
         i2s_driver_uninstall(I2S_PORT);
-        digitalWrite(PIN_AUDIO_PA_EN, LOW);
         return false;
     }
 
