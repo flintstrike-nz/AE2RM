@@ -1692,6 +1692,19 @@ void runIntroScript()
         drawViewport();
 }
 
+// (Re)counts each side's living units into startingUnits[] -- the roster
+// checkEndConditions() measures defeat against, and the source of the
+// footer's per-side tally. Called once before the first mission render
+// and again after m0's intro script (which repositions/removes units).
+void recountStartingUnits()
+{
+    for (int c = 0; c < MAX_PLAYERS; ++c)
+        startingUnits[c] = 0;
+    for (int i = 0; i < unitCount; ++i)
+        if (units[i].alive && units[i].color < MAX_PLAYERS)
+            startingUnits[units[i].color]++;
+}
+
 // Loads m<mapIndex>.aem and resets all per-game state, then switches to
 // STATE_PLAYING. Asset caches (tiles/unit icons) are content-independent
 // across maps and are deliberately NOT reset here. Returns false (and
@@ -1769,24 +1782,18 @@ bool startGame(int mapIndex, bool interactive = true)
     if (interactive)
         showMissionBriefing(mapIndex);
 
+    recountStartingUnits(); // so the first render's footer tally isn't blank
+
     appState = STATE_PLAYING;
     gfx.fillScreen(TFT_BLACK);
     drawViewport();
 
     if (mapIndex == 0 && interactive)
+    {
         runIntroScript(); // only m0 has a mission-script file -- see its comment
-
-    // Record the roster the mission actually starts from -- after any
-    // intro-script unit removals -- for checkEndConditions().
-    for (int c = 0; c < MAX_PLAYERS; ++c)
-        startingUnits[c] = 0;
-    for (int i = 0; i < unitCount; ++i)
-        if (units[i].alive && units[i].color < MAX_PLAYERS)
-            startingUnits[units[i].color]++;
-
-    // Redraw now that the roster is known -- drawHud()'s footer side
-    // tally reads startingUnits[], and the render above ran before this.
-    drawViewport();
+        recountStartingUnits(); // the intro repositions/removes units
+        drawViewport();
+    }
     return true;
 }
 
@@ -3157,17 +3164,23 @@ void drawViewport()
     {
         bool noWinner = winnerColor < 0 || winnerColor >= MAX_PLAYERS;
         uint16_t winColor = noWinner ? TFT_WHITE : PLAYER_HUD_COLOR[winnerColor];
-        bool humanAlive = false;
+        bool humanAlive = false, otherAlive = false;
         for (int i = 0; i < unitCount; ++i)
-            if (units[i].alive && units[i].color == HUMAN_COLOR)
+        {
+            if (!units[i].alive)
+                continue;
+            if (units[i].color == HUMAN_COLOR)
                 humanAlive = true;
+            else
+                otherAlive = true;
+        }
         char banner[20];
         if (!noWinner)
             snprintf(banner, sizeof(banner), "%s WINS", PLAYER_NAME[winnerColor]);
-        else if (startingUnits[HUMAN_COLOR] > 0 && !humanAlive)
-            strcpy(banner, "DEFEAT"); // human wiped out, 2+ sides still standing
+        else if (startingUnits[HUMAN_COLOR] > 0 && !humanAlive && otherAlive)
+            strcpy(banner, "DEFEAT"); // human wiped out, 2+ other sides fight on
         else
-            strcpy(banner, "DRAW"); // every side fell in the same exchange
+            strcpy(banner, "DRAW"); // nobody left standing
         gfx.fillRect(0, BANNER_Y, DISPLAY_WIDTH, BANNER_H, TFT_BLACK);
         gfx.drawFastHLine(0, BANNER_Y, DISPLAY_WIDTH, winColor);
         gfx.drawFastHLine(0, BANNER_Y + BANNER_H - 1, DISPLAY_WIDTH, winColor);
