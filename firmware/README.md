@@ -452,10 +452,14 @@ bytes, tile and unit-icon files are the expected size). The
 terrain-cost, unit-move-range, combat-stat (offence/defence/
 attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
 `main.cpp` were cross-checked field-by-field against `tiles0.prop` and
-each `*.unit` file. **It has not been flashed to or run on physical
-hardware** — this session has no access to your board. Display/touch
-pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
-first and report back what you see. The AI has no recursion and no
+each `*.unit` file. **The firmware is flashed to the board and boots**
+— PSRAM init, the embedded-asset fallback, the locale-string table, WiFi
+association and the OTA listener all come up clean over USB serial each
+build. What isn't verified is anything that needs a human at the screen:
+touch accuracy, the tap/drag split, combat and capture, a full AI turn,
+the walk animation's pacing, undo, a mission played to its win banner —
+this environment can flash and read the boot log but can't drive the
+game. The AI has no recursion and no
 `while(true)`; its one loop with a runtime-dependent trip count
 (`computeReachable()`'s `while (changed)` relaxation) terminates because
 each cell's movement budget only increases and is capped by
@@ -464,11 +468,12 @@ resolves every AI unit's move/attack, now stepping each mover along its
 path with a short per-tile delay (`walkUnitTo()`) rather than
 teleporting, so an AI turn is watchable; whether that sequence reads as a
 coherent turn (not e.g. every unit just sitting still) is still
-unverified on hardware, as is the walk animation's per-tile pacing. So is the zero-reachable-tiles edge case (handled by falling
-through to `hasMoved = true` without a move). The SD/MMC init, tile/unit
-rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp`
-is a guess), menu tap hit-testing, and OTA path are the other things
-most likely to need a follow-up fix once you can see real output.
+unverified on hardware, as is the walk animation's per-tile pacing. So is
+the zero-reachable-tiles edge case (handled by falling through to
+`hasMoved = true` without a move). Tile/unit rendering, tap-vs-drag
+detection (the `TAP_MOVE_THRESHOLD` in `main.cpp` is a guess), and menu
+tap hit-testing are the other things most likely to need a follow-up fix
+once someone plays a mission.
 `m0`'s intro cutscene is additionally unverified in two ways specific to
 it: `strings.dat`'s parse (header count, length-prefixed reads) was only
 checked by inspecting the Python asset converter's copy of `lang.dat`

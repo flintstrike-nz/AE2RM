@@ -821,13 +821,13 @@ int resolveHit(int attackerIdx, int victimIdx)
 // sprRedSpark in MainDisplayable.java) over unitIdx's tile: a 6-frame
 // spark animation (/effects/redspark_NN.bin, one file per frame -- see
 // convert_assets.py's comment on why the sheet is split into per-frame
-// files rather than converted as one image) with a "-N" damage label.
-// Not ported: the original's damage label rises and fades over ~800ms;
-// this just holds it static for the spark's duration, then lets the next
-// drawViewport() clear it -- simpler, and this display has no alpha
-// blending to fade it with anyway. Does nothing if a frame failed to
-// load (e.g. missing from the SD card) -- this is cosmetic, not worth
-// failing an attack over.
+// files rather than converted as one image) with a "-N" damage label
+// that drifts up (or down, near the top rows) and steps through two
+// greys over a few tail frames after the spark -- an approximation of
+// the original's rise-and-fade (this panel has no alpha, so the fade is
+// a colour step, not a blend). Does nothing if a frame failed to load
+// (e.g. missing from the SD card) -- this is cosmetic, not worth failing
+// an attack over.
 void playHitEffect(int unitIdx, int hit)
 {
     const UnitPlacement &u = units[unitIdx];
@@ -2845,6 +2845,10 @@ void handleTap(int screenX, int screenY)
             infoUnit = -1;
             selectedUnit = i;
             computeReachable(units[i]);
+            // walkUnitTo() may have panned to the move's destination --
+            // bring the camera back so the restored unit and its
+            // highlights are actually on screen.
+            centerViewOnTile(undoFromX, undoFromY);
         }
         drawViewport();
         return;
