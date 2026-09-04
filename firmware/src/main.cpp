@@ -2645,8 +2645,8 @@ constexpr int RETRY_BTN_X = (DISPLAY_WIDTH - RETRY_BTN_W) / 2;
 constexpr int RETRY_BTN_Y = BANNER_Y + BANNER_H + 8;
 
 // Pause menu (hamburger) -- a centred list, shared between drawPauseMenu()
-// and handleTap(). Rows: Return to game / Save game / Load game / Exit to
-// title.
+// and handleTap(). Rows: Return to game / Save game / Load game /
+// Sound on-off / Exit to title.
 enum { PM_RETURN, PM_SAVE, PM_LOAD, PM_MUTE, PM_EXIT, PM_ROWS };
 constexpr int PM_W = 176;
 constexpr int PM_ROW_H = 30;

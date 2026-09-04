@@ -25,7 +25,8 @@
 #define PIN_TOUCH_RST  18
 
 // --- Audio codec (ES8311, I2C addr 0x18 — shares the touch I2C bus) + I2S ---
-// Not used by the firmware yet; recorded here for the next milestone.
+// Used by src/audio.cpp (chiptune synth). Still not confirmed against
+// real hardware -- see that file's header and the README.
 #define PIN_AUDIO_PA_EN 1  // speaker amp enable
 // GPIO level that ENABLES the amp. The xiaozhi-esp32 firmware for this
 // class of board drives it high to enable, so that's the default here --
