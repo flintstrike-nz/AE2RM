@@ -825,9 +825,9 @@ int resolveHit(int attackerIdx, int victimIdx)
 // that drifts up (or down, near the top rows) and steps through two
 // greys over a few tail frames after the spark -- an approximation of
 // the original's rise-and-fade (this panel has no alpha, so the fade is
-// a colour step, not a blend). Does nothing if a frame failed to load
-// (e.g. missing from the SD card) -- this is cosmetic, not worth failing
-// an attack over.
+// a colour step, not a blend). If a spark frame failed to load (e.g.
+// missing from the SD card) the label still plays but the spark is
+// skipped -- this is cosmetic, not worth failing an attack over.
 void playHitEffect(int unitIdx, int hit)
 {
     const UnitPlacement &u = units[unitIdx];

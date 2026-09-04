@@ -71,10 +71,12 @@ not yet confirmed on-device.
   TURN to pass to the AI (see below).
 - Undo: right after a plain move (no capture, no attack) an **UNDO**
   button appears at the footer-left; tapping it puts the unit back where
-  it started and un-spends its turn, then re-selects it. Any other action
-  -- another move, an attack, opening a menu, ending the turn -- commits
-  the move and the button goes away. A move that captured a building
-  isn't undoable (that flips ownership and income).
+  it started and un-spends its turn, then re-selects it. Any other *tap*
+  -- another move, an attack, opening a menu, ending the turn, or just
+  tapping empty ground -- commits the move and the button goes away.
+  Panning the camera (a drag, not a tap) leaves the undo available. A
+  move that captured a building isn't undoable (that flips ownership and
+  income).
 - Combat: any enemy unit already within the selected unit's attack range
   (`UNIT_ATTACK_RANGE_MIN`/`MAX` per type — e.g. archers can hit at 1-2
   tiles, the catapult only at 2-4) highlights red and is a valid tap
@@ -104,7 +106,7 @@ not yet confirmed on-device.
   every hit -- the direct attack and, if it happens, the counterattack --
   plays the original's own combat spark (`createSimpleSparkSprite()`
   with `sprRedSpark` in `MainDisplayable.java`, converted from
-  `redspark.png`'s 6-frame sheet) over the target's tile, with a static
+  `redspark.png`'s 6-frame sheet) over the target's tile, with a
   "-N" damage label that drifts up (or down, near the top rows) ~2px per
   frame and steps down through two greys over three tail frames after the
   spark ends -- an approximation of the original's rise-and-fade (this
