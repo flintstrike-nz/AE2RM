@@ -27,13 +27,12 @@
 // --- Audio codec (ES8311, I2C addr 0x18 — shares the touch I2C bus) + I2S ---
 // Used by src/audio.cpp (chiptune synth). Still not confirmed against
 // real hardware -- see that file's header and the README.
-#define PIN_AUDIO_PA_EN 1  // speaker amp enable
-// GPIO level that ENABLES the amp. The xiaozhi-esp32 firmware for this
-// class of board drives it high to enable, so that's the default here --
-// but the polarity isn't confirmed on this exact board (Copilot's review
-// of the audio PR believed it active-low). If there's no sound, try
-// flipping this to 0.
-#define AUDIO_PA_EN_ON  1
+#define PIN_AUDIO_PA_EN 1  // FM8002E amp SHUTDOWN input
+// GPIO level that ENABLES the amp. The ES3C28P wires GPIO1 to the
+// FM8002E's active-low SHUTDOWN pin, so LOW enables and HIGH shuts down
+// (per the board reference cited in the audio PR review). NOT verified
+// on hardware here -- if there's no sound, try flipping this to 1.
+#define AUDIO_PA_EN_ON  0
 #define AUDIO_PA_EN_OFF (!AUDIO_PA_EN_ON)
 #define PIN_I2S_MCLK    4
 #define PIN_I2S_BCLK    5
