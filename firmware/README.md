@@ -64,8 +64,19 @@ not yet confirmed on-device.
   cyan, terrain-cost-limited by `UNIT_MOVE_RANGE` per unit type and
   `TERRAIN_MOVE_COST` per tile type (both taken directly from the
   original's `.unit` files and `tiles0.prop` — see the tables' comments
-  in `main.cpp`). Tap a highlighted tile to move there; tap END TURN to
-  pass to the AI (see below).
+  in `main.cpp`). Tap a highlighted tile to move there; the unit walks
+  the path one tile at a time (`walkUnitTo()` reconstructs it from the
+  `computeReachable()` cost gradient and steps it with a ~55ms delay per
+  tile) rather than teleporting -- AI moves animate the same way. Tap END
+  TURN to pass to the AI (see below).
+- Undo: right after a plain move (no capture, no attack) an **UNDO**
+  button appears at the footer-left; tapping it puts the unit back where
+  it started and un-spends its turn, then re-selects it. Any other *tap*
+  -- another move, an attack, opening a menu, ending the turn, or just
+  tapping empty ground -- commits the move and the button goes away.
+  Panning the camera (a drag, not a tap) leaves the undo available. A
+  move that captured a building isn't undoable (that flips ownership and
+  income).
 - Combat: any enemy unit already within the selected unit's attack range
   (`UNIT_ATTACK_RANGE_MIN`/`MAX` per type — e.g. archers can hit at 1-2
   tiles, the catapult only at 2-4) highlights red and is a valid tap
@@ -95,14 +106,15 @@ not yet confirmed on-device.
   every hit -- the direct attack and, if it happens, the counterattack --
   plays the original's own combat spark (`createSimpleSparkSprite()`
   with `sprRedSpark` in `MainDisplayable.java`, converted from
-  `redspark.png`'s 6-frame sheet) over the target's tile, with a static
-  "-N" damage label. A real pause (`COUNTERATTACK_PAUSE_MS`, 300ms)
-  separates the attack from the counter so both are actually visible,
-  not just one final redraw -- an approximation of the original's own
-  ~800ms gap between them. Not ported: the original's damage label
-  rises and fades over that time; this just holds it in place for the
-  spark's duration then lets the next redraw clear it (this port has no
-  alpha-blending pipeline to fade it with). Each of the 6 frames forces
+  `redspark.png`'s 6-frame sheet) over the target's tile, with a
+  "-N" damage label that drifts up (or down, near the top rows) ~2px per
+  frame and steps down through two greys over three tail frames after the
+  spark ends -- an approximation of the original's rise-and-fade (this
+  panel has no alpha, so the "fade" is a colour step, not a blend). A
+  real pause (`COUNTERATTACK_PAUSE_MS`, 300ms) separates the attack from
+  the counter so both are actually visible, not just one final redraw --
+  an approximation of the original's own ~800ms gap between them. Each of
+  the 6 frames forces
   a full `drawViewport()` redraw first -- `pushImage()`'s transparent-skip
   only omits *source* pixels that are transparent, so without resetting
   the background before every frame, the previous frame's opaque pixels
@@ -442,23 +454,28 @@ bytes, tile and unit-icon files are the expected size). The
 terrain-cost, unit-move-range, combat-stat (offence/defence/
 attack-range), and unit-property (`UNIT_PROPERTIES`) tables in
 `main.cpp` were cross-checked field-by-field against `tiles0.prop` and
-each `*.unit` file. **It has not been flashed to or run on physical
-hardware** — this session has no access to your board. Display/touch
-pins are confirmed; SD/MMC pins and WiFi/OTA are not — flash over USB
-first and report back what you see. The AI has no recursion and no
+each `*.unit` file. **The firmware is flashed to the board and boots**
+— PSRAM init, the embedded-asset fallback, the locale-string table, WiFi
+association and the OTA listener all come up clean over USB serial each
+build. What isn't verified is anything that needs a human at the screen:
+touch accuracy, the tap/drag split, combat and capture, a full AI turn,
+the walk animation's pacing, undo, a mission played to its win banner —
+this environment can flash and read the boot log but can't drive the
+game. The AI has no recursion and no
 `while(true)`; its one loop with a runtime-dependent trip count
 (`computeReachable()`'s `while (changed)` relaxation) terminates because
 each cell's movement budget only increases and is capped by
 `UNIT_MOVE_RANGE`, so a hang isn't the structural risk. `endTurn()`
-resolves every AI unit's move/attack and mutates game state before a
-single `drawViewport()` call at the end -- there's no per-unit animation
-to watch, only the final board state, and whether that final state looks
-like a coherent turn (not e.g. every unit just sitting still) is
-unverified. So is the zero-reachable-tiles edge case (handled by falling
-through to `hasMoved = true` without a move). The SD/MMC init, tile/unit
-rendering, tap-vs-drag detection (the `TAP_MOVE_THRESHOLD` in `main.cpp`
-is a guess), menu tap hit-testing, and OTA path are the other things
-most likely to need a follow-up fix once you can see real output.
+resolves every AI unit's move/attack, now stepping each mover along its
+path with a short per-tile delay (`walkUnitTo()`) rather than
+teleporting, so an AI turn is watchable; whether that sequence reads as a
+coherent turn (not e.g. every unit just sitting still) is still
+unverified on hardware, as is the walk animation's per-tile pacing. So is
+the zero-reachable-tiles edge case (handled by falling through to
+`hasMoved = true` without a move). Tile/unit rendering, tap-vs-drag
+detection (the `TAP_MOVE_THRESHOLD` in `main.cpp` is a guess), and menu
+tap hit-testing are the other things most likely to need a follow-up fix
+once someone plays a mission.
 `m0`'s intro cutscene is additionally unverified in two ways specific to
 it: `strings.dat`'s parse (header count, length-prefixed reads) was only
 checked by inspecting the Python asset converter's copy of `lang.dat`
