@@ -227,7 +227,7 @@ def main():
     # Skirmish maps s0.aem .. s11.aem -- same .aem binary layout as the
     # story maps, but the firmware derives a turn queue from castle
     # ownership at load rather than assuming 2 sides (see main.cpp's
-    # loadMap()/startSkirmish()). Their names are locale strings 101..112.
+    # buildSkirmishTurnQueue()). Their names are locale strings 101..112.
     SKIRMISH_MAP_COUNT = 12
     for i in range(SKIRMISH_MAP_COUNT):
         name = f"s{i}.aem"

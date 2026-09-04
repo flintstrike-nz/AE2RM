@@ -1986,15 +1986,24 @@ bool startGame(int mapIndex, bool interactive = true, bool skirmish = false)
 
 void handleMenuTap(int screenX, int screenY)
 {
-    // Tab bar.
+    // Tab bar -- hit-test each drawn button rect exactly (drawMenu() lays
+    // them out as [20 + t*tabW, +tabW-4), so the 4px gap and the margins
+    // outside are dead).
     if (screenY >= MENU_TAB_Y && screenY < MENU_TAB_Y + MENU_TAB_H)
     {
         int tabW = (DISPLAY_WIDTH - 40) / 2;
-        int t = (screenX - 20) / tabW;
-        if (t >= 0 && t <= 1 && t != menuTab)
+        for (int t = 0; t < 2; ++t)
         {
-            menuTab = t;
-            drawMenu();
+            int tx = 20 + t * tabW;
+            if (screenX >= tx && screenX < tx + tabW - 4)
+            {
+                if (t != menuTab)
+                {
+                    menuTab = t;
+                    drawMenu();
+                }
+                return;
+            }
         }
         return;
     }
